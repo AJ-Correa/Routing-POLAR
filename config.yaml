@@ -1,0 +1,211 @@
+# =============================================================================
+# MODEL ARCHITECTURE PARAMETERS
+# =============================================================================
+
+model_params:
+  embedding_dim: 128          # Dimension of embeddings
+  encoder_layer_num: 6        # Number of encoder layers
+  qkv_dim: 16                 # Dimension per attention head
+  head_num: 8                 # Number of attention heads
+  ff_hidden_dim: 512          # Feed-forward hidden dimension
+  ffd: 'siglu'                # FFN type: 'ffd' (standard) or 'siglu' (ParallelGatedMLP)
+  norm_type: 'rms'            # Normalization: 'rms', 'layer', 'instance', 'none'
+  use_sparse: 'topk'          # Sparse attention
+  p_num: 6                    # Number of constraints (6 by default): O, L, TW, B, MB, MD
+  logit_clipping: 10          # Logit clipping parameter
+  
+  # Feature switches
+  use_film: true              # FiLM (Feature-wise Linear Modulation) for task conditioning
+  use_reld: true              # Rethinking Light Decode-based solvers (Huang et al., 2025)
+  use_rope: true              # RoPE-2D (2D Rotary Positional Embeddings)
+  use_ple: true               # Progressive Layer Extraction
+  use_qk_norm: false          # Query-Key Normalization
+  use_ccl: false              # Chain-of-Context Learning (Gui et al., 2026)
+  ccl_prob_train: 0.5         # CCL probability during training
+  ccl_prob_test: 1.0          # CCL probability during testing
+
+
+# =============================================================================
+# TESTER PARAMETERS (TEST-TIME REFINEMENT)
+# =============================================================================
+
+tester_params:
+  use_refinement: false       # Use test-time refinement
+  ls_nb_granular: 20          # LS neighbourhood granularity
+  use_topk_beam: true         # Use top-k beam search (improves diversity and lowers gaps)
+  beam_size: 5                # Number of beams
+  temperature: 1.0            # Temperature for top-k beam search
+  num_iters: 5              # Number of iterations for local search
+  omega: 8                    # Number of nodes to be perturbed
+  num_decodings: 2            # Number of decoding iterations to perform
+
+
+# =============================================================================
+# TRAINING PARAMETERS (16 VRP Variants)
+# =============================================================================
+
+trainer_params:
+  epochs: 300                 # Total training epochs
+  train_episodes: 100000      # Training instances per epoch
+  model_save_interval: 10     # Save checkpoint every N epochs
+  use_amp: true               # Automatic Mixed Precision (BF16/FP16)
+  
+  # Loss function
+  loss_function: 'po'         # 'po' (Preference Optimization) or 'rl' (REINFORCE)
+  po_alpha: 0.05              # PO temperature parameter
+  po_B: null                  # Number of solutions generated per instance (null = all POMO starts)
+  
+  # Local search
+  use_ls: true                # Enable local search during training
+  ls_start_epoch: 250         # Epoch to activate local search
+  ls_nb_granular: 20          # Neighbourhood granularity for PyVRP local search
+  
+  # EMA
+  use_ema: false              # Enable Exponential Moving Average
+  ema_decay: 0.999            # EMA decay rate
+  ema_warmup_steps: 2000      # Warm-up steps before starting EMA
+
+
+# =============================================================================
+# OPTIMIZER PARAMETERS (Main Training)
+# =============================================================================
+
+optimizer_params:
+  optimizer:
+    lr: 3e-4                     # Learning rate
+    weight_decay: 1e-6           # L2 regularization
+    beta1: 0.9                   # Optimizer beta1 (Adam: momentum; Lion: gradient momentum) 0.95 for lion, 0.9 for adamw
+    beta2: 0.999                 # Optimizer beta2 (Adam: second-moment; Lion: update momentum) 0.98 for lion, 0.999 for adamw
+  scheduler:
+    name: 'MultiStepLR'          # LR scheduler type ('MultiStepLR' by default, others are not implemented)
+    milestones: [270, 295]       # Epochs to decay LR [180, 200, 270] for lion; [270, 295] for adamw
+    gamma: 0.1                   # LR decay factor 0.33 for lion, 0.1 for adamw
+  use_lion: false                # Use Lion optimizer instead of AdamW
+
+
+# =============================================================================
+# FINE-TUNING PARAMETERS (32 Unseen Variants), following Berto et al. (2025)
+# =============================================================================
+
+tuner_params:
+  epochs: 10                 # Fine-tuning epochs
+  train_episodes: 10000       # Instances per epoch for fine-tuning
+  model_save_interval: 10     # Save checkpoint every N epochs
+  test_interval: 5            # Test every N epochs during fine-tuning
+  use_amp: true               # Automatic Mixed Precision
+  
+  # Loss function
+  loss_function: 'po'         # 'po' (Preference Optimization) or 'rl' (REINFORCE)
+  po_alpha: 0.03              # PO temperature parameter
+  po_B: null                  # Number of solutions generated per instance (null = all POMO starts)
+  
+  # Local search
+  use_ls: false               # Enable local search during fine-tuning
+  ls_start_epoch: 1           # Epoch to activate local search
+  ls_nb_granular: 20          # Neighbourhood granularity for PyVRP local search
+  
+  # EMA
+  use_ema: false              # Enable EMA during fine-tuning
+  ema_decay: 0.999            # EMA decay rate
+  ema_warmup_steps: 500       # Shorter warmup for fine-tuning
+  
+  # Variant selection
+  # 'mb': 8 mixed backhaul single-depot variants
+  # 'md': 16 multi-depot variants  
+  # 'both': 8 multi-depot with mixed backhaul
+  variant_present: 'md'
+
+
+# =============================================================================
+# FINE-TUNING OPTIMIZER PARAMETERS
+# =============================================================================
+
+tuner_optimizer_params:
+  optimizer:
+    lr: 1e-4                  # Learning rate for fine-tuning (overridden by --lr)
+    weight_decay: 1e-6        # L2 regularization
+    beta1: 0.9                # Optimizer beta1 (Adam: momentum; Lion: gradient momentum)
+    beta2: 0.999              # Optimizer beta2 (Adam: second-moment; Lion: update momentum)
+  scheduler:
+    name: 'MultiStepLR'       # LR scheduler type ('MultiStepLR' by default, others are not implemented)
+    milestones: [8]           # Epochs to decay LR
+    gamma: 0.1                # LR decay factor
+  use_lion: false             # Use Lion optimizer instead of AdamW
+
+
+# =============================================================================
+# ENVIRONMENT & DATA PARAMETERS
+# =============================================================================
+
+env:
+  generator_params:
+    num_loc: 50               # Number of customer nodes (50 or 100)
+    variant_preset: 'all'     # Variants to sample: 'all' (all 16 variants) or it can be individual variants
+  
+  # Testing
+  test_epoch: [50, 150]       # Additional test epochs
+  test_interval: 10           # Test every N epochs during training
+  test_episodes: 1000         # Number of test instances per evaluation
+  test_batch_size: 1000       # Batch size for testing
+  data_dir: './data'          # Directory containing datasets
+  
+  # Test configuration indices (reference lists below)
+  test_size_idx: [0]          # 0=50, 1=100, 2=200, 3=300
+  test_problem_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]  # All 16 variants
+  test_distribution_idx: [9]   # 9=uniform
+
+
+# =============================================================================
+# METRIC LABELS (for logging)
+# =============================================================================
+# Format: 'priority/prefix_description'
+# priority: 0=highest, 1=second, etc.
+
+metric_label:
+  - 'loss'     # loss
+  - 'cost'     # cost
+
+test_metric_label:
+  - '1g/0gap'      # gap to optimal
+  - '2ag/0aug_gap' # gap with augmentation
+
+
+# =============================================================================
+# TEST CONFIGURATION LISTS
+# =============================================================================
+
+all_test_size:
+  - 50
+  - 100
+  - 200
+  - 300
+
+all_test_problem:
+  - "cvrp"
+  - "ovrp"
+  - "vrpb"
+  - "vrpl"
+  - "vrptw"
+  - "ovrptw"
+  - "ovrpb"
+  - "ovrpl"
+  - "ovrpbl"
+  - "ovrpbtw"
+  - "ovrpltw"
+  - "ovrpbltw"
+  - "vrpbl"
+  - "vrpbtw"
+  - "vrpltw"
+  - "vrpbltw"
+
+all_test_distribution:
+  - "explosion"
+  - "implosion"
+  - "cluster"
+  - "rotation"
+  - "linearprojection"
+  - "axisprojection"
+  - "expansion"
+  - "compression"
+  - "grid"
+  - "uniform"
