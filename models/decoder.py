@@ -37,7 +37,7 @@ class VRP_Decoder(nn.Module):
                 self.attr_mapping = nn.Linear(5, embedding_dim, bias=False)
             self.decoder_ffn = FeedForward(**model_params)
 
-    def forward(self, td, cache, num_starts, reld_alpha=1.0, ccl_active=None, pref_emb=None):
+    def forward(self, td, cache, num_starts, reld_alpha=1.0, ccl_active=None):
         # Split batch dimension for multi-start decoding
         td = unbatchify(td, num_starts)
         
@@ -118,12 +118,6 @@ class VRP_Decoder(nn.Module):
                 remaining_linehaul, remaining_backhaul, td["current_time"], 
                 td["current_route_length"], td["open_route"]
             ], dim=-1)
-
-            # Preference injection: pull cur_node query toward the LS-improved tour
-            # subspace.  Lives ONLY in the non-CCL branch; CCL pathway untouched.
-            # pref_emb: (B, D) → unsqueeze → (B, 1, D) → broadcasts over num_starts S.
-            if pref_emb is not None:
-                cur_node_embedding = 0.9 * cur_node_embedding + 0.1 * pref_emb.unsqueeze(1)
             
             context_embedding = torch.cat([cur_node_embedding, state_embedding], dim=-1)
 

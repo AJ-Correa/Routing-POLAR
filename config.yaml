@@ -17,9 +17,8 @@ model_params:
   # Feature switches
   use_film: true              # FiLM (Feature-wise Linear Modulation) for task conditioning
   use_reld: true              # Rethinking Light Decode-based solvers (Huang et al., 2025)
-  use_rope: true              # RoPE-2D (2D Rotary Positional Embeddings)
-  use_ple: true               # Progressive Layer Extraction
-  use_qk_norm: false          # Query-Key Normalization
+  use_rope: false             # RoPE-2D (2D Rotary Positional Embeddings)
+  use_ple: false              # Progressive Layer Extraction
   use_ccl: false              # Chain-of-Context Learning (Gui et al., 2026)
   ccl_prob_train: 0.5         # CCL probability during training
   ccl_prob_test: 1.0          # CCL probability during testing
@@ -30,14 +29,13 @@ model_params:
 # =============================================================================
 
 tester_params:
-  use_refinement: false       # Use test-time refinement
+  use_refinement: true        # Use test-time refinement
   ls_nb_granular: 20          # LS neighbourhood granularity
-  use_topk_beam: true         # Use top-k beam search (improves diversity and lowers gaps)
-  beam_size: 5                # Number of beams
-  temperature: 1.0            # Temperature for top-k beam search
-  num_iters: 5              # Number of iterations for local search
-  omega: 8                    # Number of nodes to be perturbed
-  num_decodings: 2            # Number of decoding iterations to perform
+  num_iters: 100              # Number of ILS iterations
+  acceptance_rate: 0.001      # Accept solutions with cost up to current_cost * (1 + acceptance_rate)
+  no_improvement: 8           # Reset to best tour after this many rejected ILS iterations
+  dmax: 25                    # Initial perturbation degree (vertices removed)
+  dmin: 2                     # Final perturbation degree (vertices removed)
 
 
 # =============================================================================
@@ -59,11 +57,6 @@ trainer_params:
   use_ls: true                # Enable local search during training
   ls_start_epoch: 250         # Epoch to activate local search
   ls_nb_granular: 20          # Neighbourhood granularity for PyVRP local search
-  
-  # EMA
-  use_ema: false              # Enable Exponential Moving Average
-  ema_decay: 0.999            # EMA decay rate
-  ema_warmup_steps: 2000      # Warm-up steps before starting EMA
 
 
 # =============================================================================
@@ -103,11 +96,6 @@ tuner_params:
   use_ls: false               # Enable local search during fine-tuning
   ls_start_epoch: 1           # Epoch to activate local search
   ls_nb_granular: 20          # Neighbourhood granularity for PyVRP local search
-  
-  # EMA
-  use_ema: false              # Enable EMA during fine-tuning
-  ema_decay: 0.999            # EMA decay rate
-  ema_warmup_steps: 500       # Shorter warmup for fine-tuning
   
   # Variant selection
   # 'mb': 8 mixed backhaul single-depot variants

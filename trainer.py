@@ -34,7 +34,6 @@ from models.model import VRPModel
 from envs.mtvrp import MTVRPEnv, get_dataloader
 from envs.transformer import StateAugmentation
 from utils.search import Search
-from utils.ema import ModelEMA
 from lion_pytorch import Lion
 from tester import VRPTester
 
@@ -125,16 +124,6 @@ class VRPTrainer:
         if hasattr(self.model, "set_loss_mode"):
             self.model.set_loss_mode(self.loss_function)
 
-        # EMA for training stability
-        self.use_ema = args.trainer_params.get("use_ema", False)
-        if self.use_ema:
-            ema_decay = args.trainer_params.get("ema_decay", 0.999)
-            ema_warmup = args.trainer_params.get("ema_warmup_steps", 1000)
-            self.ema = ModelEMA(self.model, decay=ema_decay, warmup_steps=ema_warmup)
-            args.log(f"Using EMA with decay={ema_decay}, warmup={ema_warmup} steps")
-        else:
-            self.ema = None
-
     def _configure_training_tools(self):
         """Setup optimizer, scheduler, and AMP gradient scaler."""
         args = self.args
@@ -206,11 +195,6 @@ class VRPTrainer:
 
         if self.use_amp and "scaler_state_dict" in checkpoint:
             self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
-
-        # Restore EMA state if available
-        if self.use_ema and "ema_state_dict" in checkpoint:
-            self.ema.load_state_dict(checkpoint["ema_state_dict"])
-            args.log("EMA state restored from checkpoint")
 
         args.log(f"Saved Model Loaded from {checkpoint_fullname}.")
 
@@ -472,24 +456,13 @@ class VRPTrainer:
     # =========================================================================
 
     def _test(self, epoch, dataloader=None):
-        """Run evaluation using the EMA model when available, otherwise the live model.
-
-        Temporarily swaps self.tester.model to self.ema.ema_model so that all
-        test() / test_lib() internals (including _apply_test_search) automatically
-        use the smoothed weights.  The swap is always reversed, even on exception.
-        """
+        """Run evaluation."""
         clear_gpu()
-        use_ema_for_test = self.use_ema and self.ema is not None
-        if use_ema_for_test:
-            self.tester.model = self.ema.ema_model
-        try:
-            if dataloader is not None:
-                return self.tester.test(epoch, dataloader)
-            else:
-                return self.tester.test_lib(epoch)
-        finally:
-            if use_ema_for_test:
-                self.tester.model = self.model
+
+        if dataloader is not None:
+            return self.tester.test(epoch, dataloader)
+        else:
+            return self.tester.test_lib(epoch)
 
     # =========================================================================
     # Main Training Loop
@@ -678,11 +651,6 @@ class VRPTrainer:
                         else:
                             self.optimizer.step()
 
-                        # ============ EMA UPDATE ============
-                        if self.use_ema:
-                            source_model = self.model.module if args.ddp else self.model
-                            self.ema.update(source_model)
-
                         # Update instances count
                         instances_seen += batch_size
                         step += 1
@@ -824,10 +792,6 @@ class VRPTrainer:
                             checkpoint_dict["scaler_state_dict"] = (
                                 self.scaler.state_dict()
                             )
-
-                        # Include EMA state if enabled
-                        if self.use_ema:
-                            checkpoint_dict["ema_state_dict"] = self.ema.state_dict()
 
                         torch.save(
                             checkpoint_dict,

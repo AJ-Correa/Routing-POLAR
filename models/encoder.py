@@ -169,13 +169,6 @@ class EncoderLayer(nn.Module):
                 torch.tensor([0.2], dtype=torch.float, requires_grad=True)
             )
 
-        # QK-Norm for training stability
-        self.use_qk_norm = model_params.get("use_qk_norm", False)
-        if self.use_qk_norm:
-            norm_type = self.model_params.get("norm_type", "rms")
-            self.q_norm = RMSNorm(qkv_dim) if norm_type == "rms" else nn.LayerNorm(qkv_dim)
-            self.k_norm = RMSNorm(qkv_dim) if norm_type == "rms" else nn.LayerNorm(qkv_dim)
-
     def forward(
         self, input1, coords=None, rope_cos=None, rope_sin=None, rope_module=None
     ):
@@ -200,11 +193,6 @@ class EncoderLayer(nn.Module):
                 k = torch.cat([k_nodes, k_prompt], dim=2)
             else:
                 q, k = rope_module(q, k, rope_cos, rope_sin)
-
-        # Apply QK-Norm
-        if self.use_qk_norm:
-            q = self.q_norm(q)
-            k = self.k_norm(k)
 
         attn_weight = None
         if self.model_params["use_sparse"] == "topk":

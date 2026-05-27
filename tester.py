@@ -100,8 +100,20 @@ class VRPTester:
         excel_data_a8gap = []  # List of (problem, aug_gap) tuples
 
         tmp_test_metric_label = ["NO_AUG Obj.", "NO_AUG Gap", "AUG Obj.", "AUG Gap"]
+
+        def rank(name):
+            parts = name.lower().split("_")
+            variant = parts[1] if len(parts) > 1 else name.lower()
+            if variant == "vrptw":
+                return 0
+            if variant == "ovrp":
+                return 1
+            if variant == "vrpb":
+                return 2
+            return 99
+        ordered_items = sorted(test_dataloader.items(), key=lambda x: rank(x[0]))
         
-        for data_idx, (dataset_name, dataloader) in enumerate(test_dataloader.items()):
+        for data_idx, (dataset_name, dataloader) in enumerate(ordered_items):
             all_metric = []
             eval_label = f"Eval {dataset_name:7s} {str(data_idx + 1).zfill(3)}/{str(dataset_num).zfill(3)} | Epoch{str(epoch).zfill(3)}"
 
@@ -145,12 +157,15 @@ class VRPTester:
                             td_aug,
                             self.env,
                             ls_nb_granular=args.tester_params.get("ls_nb_granular", 20),
-                            use_beam=args.tester_params.get("use_topk_beam", False),
-                            beam_size=args.tester_params.get("beam_size", 3),
-                            temperature=args.tester_params.get("temperature", 0.5),
                             num_iters=args.tester_params.get("num_iters", 75),
-                            omega=args.tester_params.get("omega", 8),
-                            num_decodings=args.tester_params.get("num_decodings", 1),
+                            dmax=args.tester_params.get("dmax", 10),
+                            dmin=args.tester_params.get("dmin", 5),
+                            acceptance_rate=args.tester_params.get(
+                                "acceptance_rate", 0.01
+                            ),
+                            no_improvement=args.tester_params.get(
+                                "no_improvement", 8
+                            ),
                         )
                         else:
                             out = self.model(td_aug, self.env)
@@ -283,11 +298,11 @@ class VRPTester:
         # Print overall average gaps
         if all_gaps:
             avg_gap = np.mean(all_gaps)
-            args.log(f">>> Overall Average NO_AUG Gap: {avg_gap:.2f}%")
+            args.log(f">>> Overall Average NO_AUG Gap: {avg_gap:.3f}%")
             results["overall_gap"] = avg_gap
         if all_aug_gaps:
             avg_aug_gap = np.mean(all_aug_gaps)
-            args.log(f">>> Overall Average AUG Gap: {avg_aug_gap:.2f}%")
+            args.log(f">>> Overall Average AUG Gap: {avg_aug_gap:.3f}%")
             results["overall_aug_gap"] = avg_aug_gap
 
         return results
@@ -387,13 +402,19 @@ class VRPTester:
                         ):
                             batch_td = self.augmentation(batch_td)
                             if args.tester_params.get("use_refinement", False):
-                                best_tours, reward = self.model.iterative_refinement(
+                                reward = self.model.iterative_refinement(
                                 batch_td,
                                 self.env,
                                 ls_nb_granular=args.tester_params.get("ls_nb_granular", 20),
-                                use_beam=args.tester_params.get("use_topk_beam", False),
-                                beam_size=args.tester_params.get("beam_size", 3),
-                                temperature=args.tester_params.get("temperature", 0.5),
+                                num_iters=args.tester_params.get("num_iters", 75),
+                                dmax=args.tester_params.get("dmax", 10),
+                                dmin=args.tester_params.get("dmin", 5),
+                                acceptance_rate=args.tester_params.get(
+                                    "acceptance_rate", 0.01
+                                ),
+                                no_improvement=args.tester_params.get(
+                                    "no_improvement", 8
+                                ),
                             )
                             else:
                                 out = self.model(batch_td, self.env)
@@ -500,10 +521,10 @@ class VRPTester:
 
         if all_gaps:
             avg_gap = np.mean(all_gaps)
-            args.log(f">>> Overall Average NO_AUG Gap: {avg_gap:.2f}%")
+            args.log(f">>> Overall Average NO_AUG Gap: {avg_gap:.3f}%")
         if all_aug_gaps:
             avg_aug_gap = np.mean(all_aug_gaps)
-            args.log(f">>> Overall Average AUG Gap: {avg_aug_gap:.2f}%")
+            args.log(f">>> Overall Average AUG Gap: {avg_aug_gap:.3f}%")
 
         return results
 
@@ -585,7 +606,8 @@ class VRPTester:
         args = self.args
         self.model.eval()
 
-        all_test_dataset = ["A", "B", "F", "P", "X"]
+        # all_test_dataset = ["A", "B", "F", "P", "X"]
+        all_test_dataset = ["X"]
         size_limit = 200
 
         all_dataset_dict = {
@@ -683,13 +705,17 @@ class VRPTester:
                         torch.distributed.barrier()
 
                     if args.tester_params.get("use_refinement", False):
-                        best_tours, reward = self.model.iterative_refinement(
+                        reward = self.model.iterative_refinement(
                         td,
                         self.env,
                         ls_nb_granular=args.tester_params.get("ls_nb_granular", 20),
-                        use_beam=args.tester_params.get("use_topk_beam", False),
-                        beam_size=args.tester_params.get("beam_size", 3),
-                        temperature=args.tester_params.get("temperature", 0.5),
+                        num_iters=args.tester_params.get("num_iters", 75),
+                        dmax=args.tester_params.get("dmax", 10),
+                        dmin=args.tester_params.get("dmin", 5),
+                        acceptance_rate=args.tester_params.get(
+                            "acceptance_rate", 0.01
+                        ),
+                        no_improvement=args.tester_params.get("no_improvement", 8),
                     )
                     else:
                         out = self.model(td, self.env)
@@ -710,7 +736,7 @@ class VRPTester:
                 aug_gap = (aug_score - opt) / opt * 100
 
                 args.log(
-                    f"{instance_name}, aug score {aug_score:.1f}, aug gap {aug_gap:.1f}%"
+                    f"{instance_name}, aug score {aug_score:.1f}, aug gap {aug_gap:.3f}%"
                 )
 
                 all_gap.append(gap)
@@ -739,7 +765,7 @@ class VRPTester:
                 avg_gap = sum(all_aug_gap) / len(all_aug_gap)
                 avg_obj = sum(all_aug_score) / len(all_aug_score)
                 args.log(
-                    f"\nDataset {dataset}: Avg aug Obj {avg_obj:.1f}, Avg aug Gap {avg_gap:.2f}%\n"
+                    f"\nDataset {dataset}: Avg aug Obj {avg_obj:.1f}, Avg aug Gap {avg_gap:.3f}%\n"
                 )
 
             # Save results
@@ -798,6 +824,6 @@ class VRPTester:
             avg_aug_gap = np.mean(all_aug_gaps)
             avg_aug_score = np.mean(all_aug_scores)
             args.log(f">>> CVRPLIB Overall Average AUG Score: {avg_aug_score:.1f}")
-            args.log(f">>> CVRPLIB Overall Average AUG Gap: {avg_aug_gap:.2f}%")
+            args.log(f">>> CVRPLIB Overall Average AUG Gap: {avg_aug_gap:.3f}%")
 
         return all_dataset_dict

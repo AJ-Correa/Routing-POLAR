@@ -10,20 +10,29 @@ from utils.functions import gather_by_index
 
 class RGCR(nn.Module):
     """Relevance-Guided Context Reformulation"""
+
     def __init__(self, embedding_dim):
         super().__init__()
-        
+
         # Projecting constraint attributes exactly as specified in Eq. 4 & 5
-        self.proj_B = nn.Linear(4, embedding_dim, bias=False)  # linehaul, backhaul, remaining capacity
-        self.proj_L = nn.Linear(3, embedding_dim, bias=False)  # cx, cy, remaining distance
-        self.proj_O = nn.Linear(3, embedding_dim, bias=False)  # cx, cy, total distance traveled
-        self.proj_TW = nn.Linear(4, embedding_dim, bias=False) # early, late, service, current time
-        
+        self.proj_B = nn.Linear(
+            4, embedding_dim, bias=False
+        )  # linehaul, backhaul, remaining capacity
+        self.proj_L = nn.Linear(
+            3, embedding_dim, bias=False
+        )  # cx, cy, remaining distance
+        self.proj_O = nn.Linear(
+            3, embedding_dim, bias=False
+        )  # cx, cy, total distance traveled
+        self.proj_TW = nn.Linear(
+            4, embedding_dim, bias=False
+        )  # early, late, service, current time
+
         self.proj_original = nn.Linear(embedding_dim * 4, embedding_dim, bias=False)
         self.proj_final = nn.Linear(embedding_dim * 2, embedding_dim, bias=False)
-        
+
         # Precompute inverted variance scalar for fast vector multiplication
-        self.scale_inv = 1.0 / (embedding_dim ** 0.5)
+        self.scale_inv = 1.0 / (embedding_dim**0.5)
 
     def forward(self, cur_node_emb, c_B, c_L, c_O, c_TW):
         # 1. Constraint Embeddings (Eq. 5)
@@ -60,26 +69,43 @@ class RGCR(nn.Module):
 
 
 class TSNR(nn.Module):
-    """Trajectory-Shared Node Re-embedding with Distance Bias """
+    """Trajectory-Shared Node Re-embedding with Distance Bias"""
+
     def __init__(self, embedding_dim, head_num, qkv_dim, norm_type):
         super().__init__()
         self.head_num = head_num
         self.qkv_dim = qkv_dim
-        
-        self.norm_q = RMSNorm(embedding_dim) if norm_type == 'rms' else nn.LayerNorm(embedding_dim)
-        self.norm_k = RMSNorm(embedding_dim) if norm_type == 'rms' else nn.LayerNorm(embedding_dim)
-        self.norm_v = RMSNorm(embedding_dim) if norm_type == 'rms' else nn.LayerNorm(embedding_dim)
-        self.norm_h = RMSNorm(embedding_dim) if norm_type == 'rms' else nn.LayerNorm(embedding_dim)
-        
+
+        self.norm_q = (
+            RMSNorm(embedding_dim)
+            if norm_type == "rms"
+            else nn.LayerNorm(embedding_dim)
+        )
+        self.norm_k = (
+            RMSNorm(embedding_dim)
+            if norm_type == "rms"
+            else nn.LayerNorm(embedding_dim)
+        )
+        self.norm_v = (
+            RMSNorm(embedding_dim)
+            if norm_type == "rms"
+            else nn.LayerNorm(embedding_dim)
+        )
+        self.norm_h = (
+            RMSNorm(embedding_dim)
+            if norm_type == "rms"
+            else nn.LayerNorm(embedding_dim)
+        )
+
         self.Wq = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.Wk = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.Wv = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.multi_head_combine = nn.Linear(embedding_dim, embedding_dim)
-        
+
         # Simple MLP for the final update step
         self.mlp = ParallelGatedMLP(embedding_dim)
 
-    def forward(self, H, C, coords, cur_nodes, log_d_nn=None):
+    def forward(self, H, C, coords, cur_nodes, log_d_nn=None, task_proj=None):
         """
         H: Node embeddings [Batch, N, D]
         C: Context embeddings [Batch, Starts, D]
@@ -92,34 +118,51 @@ class TSNR(nn.Module):
 
         # Queries are the node embeddings; Keys/Values are nodes + contexts
         q_in = self.norm_q(H)
-        
+
         # Cache single concatenated allocation to avoid double tensor memory allocations
         H_C_cat = torch.cat([H, C], dim=1)  # [B, N+S, D]
         k_in = self.norm_k(H_C_cat)
         v_in = self.norm_v(H_C_cat)
 
-        q = reshape_by_heads(self.Wq(q_in), self.head_num)  # [B, heads, N, D_h]
-        k = reshape_by_heads(self.Wk(k_in), self.head_num)  # [B, heads, N+S, D_h]
-        v = reshape_by_heads(self.Wv(v_in), self.head_num)  # [B, heads, N+S, D_h]
+        def apply_linear(x, weight):
+            if weight.dim() == 2:
+                return F.linear(x, weight)
+            return torch.einsum("bnd,bod->bno", x, weight)
+
+        if task_proj is None:
+            q = reshape_by_heads(self.Wq(q_in), self.head_num)  # [B, heads, N, D_h]
+            k = reshape_by_heads(self.Wk(k_in), self.head_num)  # [B, heads, N+S, D_h]
+            v = reshape_by_heads(self.Wv(v_in), self.head_num)  # [B, heads, N+S, D_h]
+        else:
+            Wq, Wk, Wv = task_proj
+            q = reshape_by_heads(apply_linear(q_in, Wq), self.head_num)
+            k = reshape_by_heads(apply_linear(k_in, Wk), self.head_num)
+            v = reshape_by_heads(apply_linear(v_in, Wv), self.head_num)
 
         # --- Distance Bias ---
         # 1. Node-node distance (d^{n-n})
         if log_d_nn is None:
             d_nn = torch.cdist(coords, coords)  # [B, N, N]
-            log_d_nn = -1 * torch.nan_to_num(torch.log(d_nn), nan=0.0, posinf=0.0, neginf=0.0)
-        
+            log_d_nn = -1 * torch.nan_to_num(
+                torch.log(d_nn), nan=0.0, posinf=0.0, neginf=0.0
+            )
+
         # 2. Node-context distance (d^{c-n})
         # Extract coordinates of the currently selected nodes across all trajectories
         cur_coords = gather_by_index(coords, cur_nodes, squeeze=False)  # [B, S, 2]
         d_cn = torch.cdist(coords, cur_coords)  # [B, N, S]
-        log_d_cn = -1 * torch.nan_to_num(torch.log(d_cn), nan=0.0, posinf=0.0, neginf=0.0)
-        
+        log_d_cn = -1 * torch.nan_to_num(
+            torch.log(d_cn), nan=0.0, posinf=0.0, neginf=0.0
+        )
+
         # Combine biases. We negate it so larger distances reduce attention.
         bias = torch.cat([log_d_nn, log_d_cn], dim=2).unsqueeze(1)  # [B, 1, N, N+S]
 
-        # Use PyTorch 2.0 Native SDPA: Implicitly fuses softmax, drops VRAM matrices, 
+        # Use PyTorch 2.0 Native SDPA: Implicitly fuses softmax, drops VRAM matrices,
         # and triggers C++ hardware-accelerated FlashAttention natively without altering math.
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)  # [B, heads, N, D_h]
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=bias
+        )  # [B, heads, N, D_h]
 
         out = out.transpose(1, 2).reshape(B, N, D)
         out = self.multi_head_combine(out)
@@ -127,8 +170,9 @@ class TSNR(nn.Module):
         H_tilde = self.norm_q(H) + out
         # H_tilde = H + out
         H_new = H_tilde + self.mlp(self.norm_h(H_tilde))
-        
+
         return H_new
+
 
 class RoPE2D(nn.Module):
     """2D Rotary Positional Embeddings for spatial coordinates."""

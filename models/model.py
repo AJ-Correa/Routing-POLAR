@@ -22,7 +22,7 @@ class VRPModel(nn.Module):
         super().__init__()
         self.args = args
         self.loss_mode = "rl"
-        if self.args.model_params.get('use_ple', False):
+        if self.args.model_params.get("use_ple", False):
             self.encoder = VRP_Encoder_PLE(**args.model_params)
         else:
             self.encoder = VRP_Encoder(**args.model_params)
@@ -56,55 +56,11 @@ class VRPModel(nn.Module):
             )
         return selected
 
-    @staticmethod
-    def topk_sample(logprobs, mask, k=3, temperature=0.5):
-        """Sample from top-k beam instead of greedy."""
-        # Mask already applied in decoder, but double-check
-        masked_logits = logprobs.masked_fill(~mask, float('-inf'))
-        topk_vals, topk_idx = torch.topk(masked_logits, k=k, dim=-1)
-        
-        # Temperature sampling
-        probs = F.softmax(topk_vals / temperature, dim=-1)
-        sampled_pos = torch.multinomial(probs, num_samples=1).squeeze(-1)
-        select = torch.gather(topk_idx, dim=-1, index=sampled_pos.unsqueeze(-1)).squeeze(-1)
-        return select
-
-    @staticmethod
-    def tour_to_preference(node_embed, tours, tour_lengths=None):
-        """Compress a tour into a single preference embedding via mean-pooling.
-
-        Parameters
-        ----------
-        node_embed   : FloatTensor (B, N, D) — static encoder embeddings
-        tours        : LongTensor  (B, T)    — node-index sequences; may be
-                        zero-padded (depot index 0 is always safe to include).
-        tour_lengths : LongTensor  (B,)      — number of valid positions per
-                        sequence.  Padding positions are masked out before the
-                        mean.  Pass None to average all T positions.
-
-        Returns
-        -------
-        pref_emb : FloatTensor (B, D)
-        """
-        B, T = tours.shape
-        N = node_embed.size(1)
-        idx = tours.clamp(0, N - 1) # guard against any out-of-range padding
-        bidx = torch.arange(B, device=node_embed.device).unsqueeze(1).expand(B, T)
-        tour_emb = node_embed[bidx, idx] # (B, T, D)
-
-        if tour_lengths is not None:
-            positions = torch.arange(T, device=tours.device).unsqueeze(0) # (1, T)
-            valid = positions < tour_lengths.unsqueeze(1) # (B, T)
-            tour_emb = tour_emb * valid.unsqueeze(-1).float()
-            denom = valid.sum(dim=1, keepdim=True).clamp(min=1).float() # (B, 1)
-            return tour_emb.sum(dim=1) / denom # (B, D)
-        return tour_emb.mean(dim=1) # (B, D)
-
     def set_loss_mode(self, mode: str):
         """Set loss mode to RL or PO."""
         self.loss_mode = mode
 
-    def forward(self, td, env, reld_alpha=1.0, with_greedy=False, pref_emb=None):
+    def forward(self, td, env, reld_alpha=1.0, with_greedy=False):
         """Main forward pass: encode -> decode -> compute reward.
 
         When ``with_greedy=True`` (used during PO+LS training) the environment
@@ -189,22 +145,39 @@ class VRPModel(nn.Module):
 
         # Precompute static node-node distance bias once per problem instance
         d_nn = torch.cdist(node_coords, node_coords)
-        log_d_nn = -1 * torch.nan_to_num(torch.log(d_nn), nan=0.0, posinf=0.0, neginf=0.0)
+        log_d_nn = -1 * torch.nan_to_num(
+            torch.log(d_nn), nan=0.0, posinf=0.0, neginf=0.0
+        )
 
         cache = PrecomputedCache(
-            node_embed, decoder_k, decoder_v, decoder_single_head_k, node_coords, log_d_nn
+            node_embed,
+            decoder_k,
+            decoder_v,
+            decoder_single_head_k,
+            node_coords,
+            log_d_nn,
         )
 
         # Autoregressive decoding loop
         step = 0
         while not td["done"].all():
             if self.decoder.use_ccl:
-                prob = self.decoder.ccl_prob_train if self.training else self.decoder.ccl_prob_test
+                prob = (
+                    self.decoder.ccl_prob_train
+                    if self.training
+                    else self.decoder.ccl_prob_test
+                )
                 use_ccl_this_step = random.random() < prob
             else:
                 use_ccl_this_step = None
 
-            logprobs, mask, cache = self.decoder(td, cache, num_starts, reld_alpha=reld_alpha, ccl_active=use_ccl_this_step, pref_emb=pref_emb)
+            logprobs, mask, cache = self.decoder(
+                td,
+                cache,
+                num_starts,
+                reld_alpha=reld_alpha,
+                ccl_active=use_ccl_this_step,
+            )
 
             if self.training:
                 # Sample for all starts; greedy for the depot-0 slot
@@ -287,20 +260,29 @@ class VRPModel(nn.Module):
 
         # Precompute static node-node distance bias (skipped if embeddings were provided)
         d_nn = torch.cdist(node_coords, node_coords)
-        log_d_nn = -1 * torch.nan_to_num(torch.log(d_nn), nan=0.0, posinf=0.0, neginf=0.0)
+        log_d_nn = -1 * torch.nan_to_num(
+            torch.log(d_nn), nan=0.0, posinf=0.0, neginf=0.0
+        )
 
         cache = PrecomputedCache(
-            node_embed, decoder_k, decoder_v, decoder_single_head_k, node_coords, log_d_nn
+            node_embed,
+            decoder_k,
+            decoder_v,
+            decoder_single_head_k,
+            node_coords,
+            log_d_nn,
         )
 
         # Replay tour steps and compute log-probs
         actions_list = []
         logprobs_list = []
-        
+
         step = 0
 
         while not td["done"].all():
-            logprobs, _, cache = self.decoder(td, cache, num_starts, reld_alpha=reld_alpha)
+            logprobs, _, cache = self.decoder(
+                td, cache, num_starts, reld_alpha=reld_alpha
+            )
             action = tours[:, step]
             logprobs = gather_by_index(logprobs, action.unsqueeze(1), dim=1)
 
@@ -328,7 +310,6 @@ class VRPModel(nn.Module):
         node_embed=None,
         node_coords=None,
         reld_alpha=1.0,
-        pref_emb=None,  # API parity only; pref injection does not apply to CCL path
     ):
         """Compute log-likelihoods for LS-improved tours alongside N sampled solutions.
 
@@ -350,7 +331,9 @@ class VRPModel(nn.Module):
 
         # Select POMO starts (same logic as forward)
         po_B = args.trainer_params.get("po_B", None)
-        num_starts, start_actions, _ = env.select_start_nodes(td, po_B=po_B, with_greedy=True)
+        num_starts, start_actions, _ = env.select_start_nodes(
+            td, po_B=po_B, with_greedy=True
+        )
         start_actions = start_actions.to(td.device)
 
         # Expand batch for multi-start decoding
@@ -380,7 +363,9 @@ class VRPModel(nn.Module):
             # Override start 0 with the LS tour's second action (customer start)
             pomo_customer_starts[:batch_size] = ls_tours[:, step]
             logprobs_list.append(
-                torch.zeros_like(pomo_customer_starts, dtype=torch.float32, device=td.device)
+                torch.zeros_like(
+                    pomo_customer_starts, dtype=torch.float32, device=td.device
+                )
             )
             actions_list.append(pomo_customer_starts)
             td.set("action", pomo_customer_starts)
@@ -400,20 +385,32 @@ class VRPModel(nn.Module):
             torch.log(d_nn), nan=0.0, posinf=0.0, neginf=0.0
         )
         cache = PrecomputedCache(
-            node_embed, decoder_k, decoder_v, decoder_single_head_k,
-            node_coords, log_d_nn,
+            node_embed,
+            decoder_k,
+            decoder_v,
+            decoder_single_head_k,
+            node_coords,
+            log_d_nn,
         )
 
         # Autoregressive decoding
         while not td["done"].all():
             if self.decoder.use_ccl:
-                prob = self.decoder.ccl_prob_train if self.training else self.decoder.ccl_prob_test
+                prob = (
+                    self.decoder.ccl_prob_train
+                    if self.training
+                    else self.decoder.ccl_prob_test
+                )
                 use_ccl_this_step = random.random() < prob
             else:
                 use_ccl_this_step = None
 
             logprobs, mask, cache = self.decoder(
-                td, cache, num_starts, reld_alpha=reld_alpha, ccl_active=use_ccl_this_step,
+                td,
+                cache,
+                num_starts,
+                reld_alpha=reld_alpha,
+                ccl_active=use_ccl_this_step,
             )
 
             # Sample all starts
@@ -459,12 +456,11 @@ class VRPModel(nn.Module):
         td_orig,
         env,
         ls_nb_granular: int = 20,
-        use_beam: bool = False,
-        beam_size: int = 1,
-        temperature: float = 0.5,
         num_iters: int = 5,
-        omega: int = 5,
-        num_decodings: int = 1,
+        dmax: int = 10,
+        dmin: int = 5,
+        acceptance_rate: float = 0.01,
+        no_improvement: int = 8,
     ):
         args = self.args
         batch_size = td_orig.batch_size[0]
@@ -489,8 +485,12 @@ class VRPModel(nn.Module):
             torch.log(d_nn), nan=0.0, posinf=0.0, neginf=0.0
         )
         static_cache = PrecomputedCache(
-            node_embed, decoder_k, decoder_v, decoder_shk,
-            node_coords, log_d_nn,
+            node_embed,
+            decoder_k,
+            decoder_v,
+            decoder_shk,
+            node_coords,
+            log_d_nn,
         )
 
         # ═════════════════════════════════════════════════════════════════
@@ -508,140 +508,143 @@ class VRPModel(nn.Module):
 
         best_reward = None
         best_tours = None
-        pref_emb = None
 
-        for it in range(num_decodings):
-            # ── Decode ────────────────────────────────────────────────────
-            td = td_orig.clone()
+        # ── Decode ────────────────────────────────────────────────────
+        td = td_orig.clone()
 
-            num_starts, start_actions, greedy_mask = env.select_start_nodes(
-                td, po_B=po_B, with_greedy=False
+        num_starts, start_actions, greedy_mask = env.select_start_nodes(
+            td, po_B=po_B, with_greedy=False
+        )
+        start_actions = start_actions.to(device)
+
+        td_dec = batchify(td, num_starts)
+        actions_list = [start_actions]
+        logprobs_list = [
+            torch.zeros_like(start_actions, dtype=torch.float32, device=device)
+        ]
+        td_dec.set("action", start_actions)
+        td_dec = env.step(td_dec)["next"]
+
+        pomo_cust = (
+            env.get_pomo_customer_starts()
+            if hasattr(env, "get_pomo_customer_starts")
+            else None
+        )
+        if pomo_cust is not None:
+            pomo_cust = pomo_cust.to(device)
+            actions_list.append(pomo_cust)
+            logprobs_list.append(
+                torch.zeros_like(pomo_cust, dtype=torch.float32, device=device)
             )
-            start_actions = start_actions.to(device)
-
-            td_dec = batchify(td, num_starts)
-            actions_list = [start_actions]
-            logprobs_list = [
-                torch.zeros_like(start_actions, dtype=torch.float32, device=device)
-            ]
-            td_dec.set("action", start_actions)
+            td_dec.set("action", pomo_cust)
             td_dec = env.step(td_dec)["next"]
 
-            pomo_cust = (
-                env.get_pomo_customer_starts()
-                if hasattr(env, "get_pomo_customer_starts") else None
+        # ── REUSE static cache instead of rebuilding ─────────────────
+        cache = static_cache  # ← was: rebuild decoder_k, decoder_v, d_nn, etc.
+
+        # Autoregressive decode
+        while not td_dec["done"].all():
+            use_ccl_step = (
+                random.random() < self.decoder.ccl_prob_test
+                if self.decoder.use_ccl
+                else None
             )
-            if pomo_cust is not None:
-                pomo_cust = pomo_cust.to(device)
-                actions_list.append(pomo_cust)
-                logprobs_list.append(
-                    torch.zeros_like(pomo_cust, dtype=torch.float32, device=device)
+            logprobs, mask, cache = self.decoder(
+                td_dec,
+                cache,
+                num_starts,
+                ccl_active=use_ccl_step,
+            )
+            select = VRPModel.greedy(logprobs, mask)
+            actions_list.append(select)
+            logprobs_list.append(gather_by_index(logprobs, select, dim=1))
+            td_dec.set("action", select)
+            td_dec = env.step(td_dec)["next"]
+
+        actions = torch.stack(actions_list, dim=1)
+        reward_all, tours_all = env.get_reward(td_dec, actions)
+
+        # Best across POMO starts
+        reward_2d = reward_all.view(num_starts, batch_size)
+        tours_3d = tours_all.view(num_starts, batch_size, -1)
+        best_start = reward_2d.argmax(dim=0)
+        batch_idx = torch.arange(batch_size, device=device)
+        reward_iter = reward_2d[best_start, batch_idx]
+        tours_iter = tours_3d[best_start, batch_idx]
+
+        # Update global best
+        if best_reward is None:
+            best_reward = reward_iter
+            best_tours = tours_iter
+        else:
+            improved_m = reward_iter > best_reward
+            best_reward = torch.where(improved_m, reward_iter, best_reward)
+
+            T_best = best_tours.size(1)
+            T_iter = tours_iter.size(1)
+            if T_best < T_iter:
+                best_tours = torch.nn.functional.pad(
+                    best_tours, (0, T_iter - T_best), value=0
                 )
-                td_dec.set("action", pomo_cust)
-                td_dec = env.step(td_dec)["next"]
-
-            # ── REUSE static cache instead of rebuilding ─────────────────
-            cache = static_cache  # ← was: rebuild decoder_k, decoder_v, d_nn, etc.
-
-            # Autoregressive decode
-            while not td_dec["done"].all():
-                use_ccl_step = (
-                    random.random() < self.decoder.ccl_prob_test
-                    if self.decoder.use_ccl else None
-                )
-                logprobs, mask, cache = self.decoder(
-                    td_dec, cache, num_starts,
-                    ccl_active=use_ccl_step,
-                    pref_emb=pref_emb,
-                )
-                if use_beam:
-                    select = VRPModel.topk_sample(logprobs, mask, k=beam_size, temperature=temperature)
-                else:
-                    select = VRPModel.greedy(logprobs, mask)
-                actions_list.append(select)
-                logprobs_list.append(gather_by_index(logprobs, select, dim=1))
-                td_dec.set("action", select)
-                td_dec = env.step(td_dec)["next"]
-
-            actions = torch.stack(actions_list, dim=1)
-            reward_all, tours_all = env.get_reward(td_dec, actions)
-
-            # Best across POMO starts
-            reward_2d = reward_all.view(num_starts, batch_size)
-            tours_3d = tours_all.view(num_starts, batch_size, -1)
-            best_start = reward_2d.argmax(dim=0)
-            batch_idx = torch.arange(batch_size, device=device)
-            reward_iter = reward_2d[best_start, batch_idx]
-            tours_iter = tours_3d[best_start, batch_idx]
-
-            # Update global best
-            if best_reward is None:
-                best_reward = reward_iter
-                best_tours = tours_iter
-            else:
-                improved_m = reward_iter > best_reward
-                best_reward = torch.where(improved_m, reward_iter, best_reward)
-
-                T_best = best_tours.size(1)
-                T_iter = tours_iter.size(1)
-                if T_best < T_iter:
-                    best_tours = torch.nn.functional.pad(best_tours, (0, T_iter - T_best), value=0)
-                elif T_iter < T_best:
-                    tours_iter = torch.nn.functional.pad(tours_iter, (0, T_best - T_iter), value=0)
-
-                best_tours = torch.where(
-                    improved_m.unsqueeze(-1).expand_as(best_tours),
-                    tours_iter,
-                    best_tours,
+            elif T_iter < T_best:
+                tours_iter = torch.nn.functional.pad(
+                    tours_iter, (0, T_best - T_iter), value=0
                 )
 
-            # ── Search (only after pass 0) ──────────────────────────────────
-            if it < num_decodings - 1:
-                best_np = best_tours.cpu().numpy()  # ← only this moves per iteration
+            best_tours = torch.where(
+                improved_m.unsqueeze(-1).expand_as(best_tours),
+                tours_iter,
+                best_tours,
+            )
 
-                ls_costs = np.empty(batch_size, dtype=np.float32)
-                ls_tours_lst = [None] * batch_size
-                futures_map = {}
+        # ── Search ──────────────────────────────────
+        best_np = best_tours.cpu().numpy()  # ← only this moves per iteration
 
-                with concurrent.futures.ProcessPoolExecutor(
-                    max_workers=workers,
-                    mp_context=mp.get_context("spawn"),
-                ) as pool:
-                    for i in range(batch_size):
-                        inst = (
-                            locs_np[i], dlin_np[i], dbac_np[i],
-                            float(dlim_np[i, 0]) if dlim_np.ndim == 2 else float(dlim_np[i]),
-                            bool(open_np[i, 0]) if open_np.ndim == 2 else bool(open_np[i]),
-                            tw_np[i], svc_np[i],
-                        )
-                        seed = (i * 100003) & 0xFFFFFFFF
+        ls_costs = np.empty(batch_size, dtype=np.float32)
+        ls_tours_lst = [None] * batch_size
+        futures_map = {}
 
-                        futures_map[pool.submit(
-                            _ls_instance_iterated, inst,
-                            best_np[i], ls_nb_granular, seed,
-                            num_iters=num_iters, omega=omega
-                        )] = i
-
-                    for fut in concurrent.futures.as_completed(futures_map):
-                        i = futures_map[fut]
-                        ls_costs[i], ls_tours_lst[i] = fut.result()
-
-                # Update best with LS results
-                ls_reward = torch.tensor(-ls_costs, dtype=torch.float32, device=device)
-                best_reward = torch.maximum(best_reward, ls_reward)
-
-                # Compute preference from LS-improved tours
-                max_t = max(len(t) for t in ls_tours_lst)
-                ls_pad = np.zeros((batch_size, max_t), dtype=np.int64)
-                ls_len = np.zeros(batch_size, dtype=np.int64)
-                for i, t in enumerate(ls_tours_lst):
-                    ls_pad[i, : len(t)] = t
-                    ls_len[i] = len(t)
-
-                ls_tours_t = torch.tensor(ls_pad, dtype=torch.long, device=device)
-                ls_lengths_t = torch.tensor(ls_len, dtype=torch.long, device=device)
-                pref_emb = VRPModel.tour_to_preference(
-                    node_embed, ls_tours_t, ls_lengths_t
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=mp.get_context("spawn"),
+        ) as pool:
+            for i in range(batch_size):
+                inst = (
+                    locs_np[i],
+                    dlin_np[i],
+                    dbac_np[i],
+                    float(dlim_np[i, 0])
+                    if dlim_np.ndim == 2
+                    else float(dlim_np[i]),
+                    bool(open_np[i, 0])
+                    if open_np.ndim == 2
+                    else bool(open_np[i]),
+                    tw_np[i],
+                    svc_np[i],
                 )
+                seed = (i * 100003) & 0xFFFFFFFF
+
+                futures_map[
+                    pool.submit(
+                        _ls_instance_iterated,
+                        inst,
+                        best_np[i],
+                        ls_nb_granular,
+                        seed,
+                        num_iters=num_iters,
+                        dmax=dmax,
+                        dmin=dmin,
+                        acceptance_rate=acceptance_rate,
+                        no_improvement=no_improvement,
+                    )
+                ] = i
+
+            for fut in concurrent.futures.as_completed(futures_map):
+                i = futures_map[fut]
+                ls_costs[i], ls_tours_lst[i] = fut.result()
+
+        # Update best with LS results
+        ls_reward = torch.tensor(-ls_costs, dtype=torch.float32, device=device)
+        best_reward = torch.maximum(best_reward, ls_reward)
 
         return best_reward

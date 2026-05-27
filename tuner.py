@@ -36,7 +36,6 @@ from utils.functions import (
     load_npz_to_tensordict,
     clip_grad_norms,
 )
-from utils.ema import ModelEMA
 from utils.search import Search
 from models.model import VRPModel
 from envs.transformer import StateAugmentation
@@ -166,16 +165,6 @@ class VRPTuner:
             self.env.set_loss_mode(self.loss_function)
         if hasattr(self.model, "set_loss_mode"):
             self.model.set_loss_mode(self.loss_function)
-
-        # EMA for training stability
-        self.use_ema = tuner_params.get("use_ema", False)
-        if self.use_ema:
-            ema_decay = tuner_params.get("ema_decay", 0.999)
-            ema_warmup = tuner_params.get("ema_warmup_steps", 500)
-            self.ema = ModelEMA(self.model, decay=ema_decay, warmup_steps=ema_warmup)
-            args.log(f"Using EMA with decay={ema_decay}, warmup={ema_warmup} steps")
-        else:
-            self.ema = None
 
     def _configure_training_tools(self):
         """Setup optimizer, scheduler, and AMP gradient scaler."""
@@ -798,11 +787,6 @@ class VRPTuner:
                         else:
                             self.optimizer.step()
 
-                        # ============ EMA UPDATE ============
-                        if self.use_ema:
-                            source_model = self.model.module if args.ddp else self.model
-                            self.ema.update(source_model)
-
                         metric_list = [loss.item(), score_mean.item()]
                         all_metric.append(metric_list)
 
@@ -889,8 +873,6 @@ class VRPTuner:
                         )
                     if self.use_amp:
                         checkpoint_dict["scaler_state_dict"] = self.scaler.state_dict()
-                    if self.use_ema:
-                        checkpoint_dict["ema_state_dict"] = self.ema.state_dict()
 
                     torch.save(
                         checkpoint_dict,
@@ -909,24 +891,17 @@ class VRPTuner:
 
     @torch.inference_mode()
     def _test_variants(self, epoch):
-        """Test on variant test sets using EMA model when available."""
+        """Test on variant test sets."""
         args = self.args
         self.model.eval()
 
-        use_ema_for_test = self.use_ema and self.ema is not None
-        if use_ema_for_test:
-            self.tester.model = self.ema.ema_model
-        try:
-            results = self.tester.test_tuning_variants(
-                epoch=epoch,
-                data_dir=args.env.get("data_dir", "./data"),
-                variant_present=self.variant_present,
-                sizes=[args.n_size],
-                solution_source="pyvrp",
-            )
-        finally:
-            if use_ema_for_test:
-                self.tester.model = self.model
+        results = self.tester.test_tuning_variants(
+            epoch=epoch,
+            data_dir=args.env.get("data_dir", "./data"),
+            variant_present=self.variant_present,
+            sizes=[args.n_size],
+            solution_source="pyvrp",
+        )
 
         if results:
             avg_gap = sum(r["aug_gap"] for r in results.values()) / len(results)

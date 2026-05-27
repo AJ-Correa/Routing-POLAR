@@ -176,6 +176,85 @@ class VRPModel(nn.Module):
             "tours": tours,
             "ccl_active_steps": [],
         }
+    
+    def route_forward(
+        self,
+        td,
+        env,
+        tours,
+        tour_lengths,
+        num_starts,
+        node_embed=None,
+        node_coords=None,
+        reld_alpha=1.0,
+    ):
+        """Compute log-likelihoods for LS-improved tours.
+
+        When node_embed and node_coords are provided (sync trainer_2 path), the
+        encoder is skipped — saving one full pass through the 6 dual-branch
+        transformer layers.  When they are None (async trainer / profiler paths),
+        the encoder runs as normal.
+
+        Parameters
+        ----------
+        node_embed  : (batch, N+1, embedding_dim) or None
+        node_coords : (batch, N+1, 2) or None
+        """
+        if tours.dim() != 2:
+            raise ValueError("tours must be 2D: [batch, steps]")
+        if tour_lengths.dim() != 1 or tour_lengths.size(0) != tours.size(0):
+            raise ValueError("tour_lengths must be 1D with same batch as tours")
+
+        node_embed, node_coords, moe_loss = self.encoder(td)
+        self.aux_loss = moe_loss
+
+        td = batchify(td, num_starts)
+
+        # Prepare decoder cache (3 linear projections)
+        decoder_k = reshape_by_heads(
+            self.decoder.Wk(node_embed), head_num=self.args.model_params["head_num"]
+        )
+        decoder_v = reshape_by_heads(
+            self.decoder.Wv(node_embed), head_num=self.args.model_params["head_num"]
+        )
+        decoder_single_head_k = node_embed.transpose(1, 2)
+
+        cache = PrecomputedCache(
+            node_embed,
+            decoder_k,
+            decoder_v,
+            decoder_single_head_k,
+            node_coords,
+        )
+
+        # Replay tour steps and compute log-probs
+        actions_list = []
+        logprobs_list = []
+
+        step = 0
+
+        while not td["done"].all():
+            logprobs, _, cache, moe_loss = self.decoder(
+                td, cache, num_starts, reld_alpha=reld_alpha
+            )
+            self.aux_loss += moe_loss
+            action = tours[:, step]
+            logprobs = gather_by_index(logprobs, action.unsqueeze(1), dim=1)
+
+            td.set("action", action)
+            actions_list.append(action)
+            logprobs_list.append(logprobs)
+            td = env.step(td)["next"]
+            step += 1
+
+        logprobs = torch.stack(logprobs_list, dim=1)
+        actions = torch.stack(actions_list, dim=1)
+        reward, tours_out = env.get_reward(td, actions)
+        assert (logprobs > -1000).data.all(), (
+            "Logprobs should not be -inf, check sampling procedure!"
+        )
+
+        return {"reward": reward, "log_likelihood": logprobs, "tours": tours_out}
 
 class VRP_Encoder(nn.Module):
     def __init__(self, **model_params):
@@ -289,18 +368,11 @@ class VRP_Decoder(nn.Module):
         qkv_dim = self.model_params["qkv_dim"]
         self.Wk = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         self.Wv = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
-
         self.Wq_last = nn.Linear(embedding_dim + 5, head_num * qkv_dim, bias=False)
 
         self.multi_head_combine = MoE(input_size=head_num * qkv_dim, output_size=embedding_dim, num_experts=4,
                                    hidden_size=self.model_params['ff_hidden_dim'], k=2, T=1.0, noisy_gating=True,
                                    routing_level='node', routing_method='input_choice', moe_model="Linear")
-
-        # ReLD decoder
-        self.use_reld = model_params.get("use_reld", False)
-        if self.use_reld:
-            self.attr_mapping = nn.Linear(5, embedding_dim, bias=False)
-            self.decoder_ffn = FeedForward(**model_params)
 
     def forward(self, td, cache, num_starts, reld_alpha=1.0):
         moe_loss = 0
@@ -336,14 +408,6 @@ class VRP_Decoder(nn.Module):
         out_concat = multi_head_attention(glimpse_q, glimpse_k, glimpse_v, mask, use_efficient=False)
         mh_atten_out, moe_loss = self.multi_head_combine(out_concat)
 
-        # ReLD: add residual connections and FFN
-        if self.use_reld:
-            # We set reld_alpha to zero in the first epoch of training to stabilize convergence
-            reld_contrib = cur_node_embedding + self.attr_mapping(state_embedding.clone())
-            mh_atten_out = mh_atten_out + (reld_alpha * reld_contrib)
-            ffn_out = self.decoder_ffn(mh_atten_out)
-            mh_atten_out = mh_atten_out + (reld_alpha * ffn_out)
-
         # Compute logits with single-head attention
         score = torch.matmul(mh_atten_out, logit_k)
         score_scaled = score / self.model_params["sqrt_embedding_dim"]
@@ -354,19 +418,6 @@ class VRP_Decoder(nn.Module):
 
         # Clip logits and apply mask
         logits = torch.tanh(logits) * self.model_params["logit_clipping"]
-
-        if self.use_reld:
-            cur_locs = gather_by_index(td["locs"], td["current_node"], dim=2).unsqueeze(2)  # [B, S, 1, 2]
-            all_locs = td["locs"]  # [B, S, N, 2]
-            
-            # cdist computes distance between each start's current pos and all N nodes
-            distance = torch.cdist(cur_locs, all_locs).squeeze(2)  # [B, S, N]
-            logdis = -1.0 * torch.nan_to_num(torch.log(distance), nan=0.0, posinf=0.0, neginf=0.0)
-            
-            # Rearrange logdis to match logits shape
-            logdis_flat = rearrange(logdis, "b s l -> (s b) l", s=num_starts)
-            
-            logits = logits + logdis_flat
 
         logits[~mask] = float("-inf")
         return F.log_softmax(logits, dim=-1), mask, cache, moe_loss
@@ -764,8 +815,8 @@ class MoE(nn.Module):
         top_k_indices = top_indices[..., :self.k]
         top_k_gates = self.softmax(top_k_logits / self.T)
 
-        zeros = torch.zeros_like(logits, requires_grad=True)  # (batch_size, num_experts)
-        gates = zeros.scatter(-1, top_k_indices, top_k_gates)  # non-topk elements will be 0
+        zeros = torch.zeros_like(logits, dtype=top_k_gates.dtype, requires_grad=True)
+        gates = zeros.scatter(-1, top_k_indices, top_k_gates)
 
         if self.noisy_gating and self.k < self.num_experts and train:
             load = (self._prob_in_top_k(clean_logits, noisy_logits, noise_stddev, top_logits)).sum(0)

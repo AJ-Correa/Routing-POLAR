@@ -1,1 +1,18 @@
+# Run outputs
 result/*
+
+# Python bytecode caches (anywhere in the repo)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE
+.idea/
+
+# Local profiling / experiment scripts (not part of the core package)
+scripts/
+
+# Cython extension: track sources only, not build artifacts
+utils/cython_heuristics/**
+!utils/cython_heuristics/heuristics.pyx
+!utils/cython_heuristics/setup.py
