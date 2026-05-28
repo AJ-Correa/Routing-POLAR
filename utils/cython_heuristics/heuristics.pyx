@@ -76,15 +76,19 @@ def insertion_by_cost(
     cnp.ndarray[cnp.int64_t, ndim=1] partial_tour,
     cnp.ndarray[cnp.int64_t, ndim=1] removed_vertices,
     cnp.ndarray[cnp.float64_t, ndim=2] cost_matrix,
+    int num_depots = 1,
 ):
     """
     C-level regret-1 insertion. Returns new tour as list (matching Python).
+
+    For multi-depot tours (tour[0] < num_depots), position 0 is skipped so
+    customers are never inserted before the first depot marker.
     """
     cdef:
         Py_ssize_t n = partial_tour.shape[0]
         Py_ssize_t k = removed_vertices.shape[0]
         Py_ssize_t current_len = n
-        Py_ssize_t v_idx, pos, best_pos, i
+        Py_ssize_t v_idx, pos, best_pos, i, start_pos
         Py_ssize_t vertex, prev_node, next_node
         double best_cost, cost
         cnp.ndarray[cnp.int64_t, ndim=1] tour = np.empty(n + k, dtype=np.int64)
@@ -92,12 +96,15 @@ def insertion_by_cost(
     for i in range(n):
         tour[i] = partial_tour[i]
 
+    # Multi-depot tours begin with a depot node; skip inserting before it.
+    start_pos = 1 if (n > 0 and partial_tour[0] < num_depots) else 0
+
     for v_idx in range(k):
         vertex = removed_vertices[v_idx]
         best_cost = INFINITY
-        best_pos = 0
+        best_pos = start_pos
 
-        for pos in range(current_len + 1):
+        for pos in range(start_pos, current_len + 1):
             if pos > 0 and pos < current_len:
                 prev_node = tour[pos - 1]
                 next_node = tour[pos]
@@ -133,15 +140,19 @@ def insertion_by_distance(
     cnp.ndarray[cnp.int64_t, ndim=1] partial_tour,
     cnp.ndarray[cnp.int64_t, ndim=1] removed_vertices,
     cnp.ndarray[cnp.float64_t, ndim=2] cost_matrix,
+    int num_depots = 1,
 ):
     """
     Insert each removed vertex at the position with minimum distance to a neighbor.
+
+    For multi-depot tours (tour[0] < num_depots), position 0 is skipped so
+    customers are never inserted before the first depot marker.
     """
     cdef:
         Py_ssize_t n = partial_tour.shape[0]
         Py_ssize_t k = removed_vertices.shape[0]
         Py_ssize_t current_len = n
-        Py_ssize_t v_idx, pos, best_pos, i
+        Py_ssize_t v_idx, pos, best_pos, i, start_pos
         Py_ssize_t vertex, prev_node, next_node
         double best_dist, dist_to_prev, dist_to_next, min_dist
         cnp.ndarray[cnp.int64_t, ndim=1] tour = np.empty(n + k, dtype=np.int64)
@@ -149,12 +160,15 @@ def insertion_by_distance(
     for i in range(n):
         tour[i] = partial_tour[i]
 
+    # Multi-depot tours begin with a depot node; skip inserting before it.
+    start_pos = 1 if (n > 0 and partial_tour[0] < num_depots) else 0
+
     for v_idx in range(k):
         vertex = removed_vertices[v_idx]
         best_dist = INFINITY
-        best_pos = 0
+        best_pos = start_pos
 
-        for pos in range(current_len + 1):
+        for pos in range(start_pos, current_len + 1):
             if pos > 0:
                 prev_node = tour[pos - 1]
                 dist_to_prev = cost_matrix[vertex, prev_node]

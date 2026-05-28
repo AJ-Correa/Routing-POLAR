@@ -177,37 +177,19 @@ class VRPTuner:
         self.use_scaler = use_scaler
 
         # Load optimizer params from config
-        if hasattr(args, "tuner_optimizer_params"):
-            opt_params = args.tuner_optimizer_params
-            lr = float(opt_params["optimizer"].get("lr", 1e-4))
-            weight_decay = float(opt_params["optimizer"].get("weight_decay", 1e-6))
-            betas = (
-                float(opt_params["optimizer"].get("beta1", 0.9)),
-                float(opt_params["optimizer"].get("beta2", 0.999)),
-            )
-            use_lion = opt_params.get("use_lion", False)
-            milestones = opt_params["scheduler"].get("milestones", [8])
-            gamma = opt_params["scheduler"].get("gamma", 0.1)
-        else:
-            lr = float(tuner_params.get("lr", 1e-4))
-            weight_decay = float(tuner_params.get("weight_decay", 1e-6))
-            betas = (0.9, 0.999)
-            use_lion = False
-            epochs = tuner_params.get("epochs", 10)
-            milestones = tuner_params.get("milestones", [int(epochs * 0.8)])
-            gamma = 0.1
+        opt_params = args.tuner_optimizer_params
+        lr = float(opt_params["optimizer"].get("lr", 1e-4))
+        weight_decay = float(opt_params["optimizer"].get("weight_decay", 1e-6))
+        betas = (
+            float(opt_params["optimizer"].get("beta1", 0.9)),
+            float(opt_params["optimizer"].get("beta2", 0.999)),
+        )
+        milestones = opt_params["scheduler"].get("milestones", [8])
+        gamma = opt_params["scheduler"].get("gamma", 0.1)
 
-        # Optimizer: Lion or AdamW
-        if use_lion:
-            from lion_pytorch import Lion
-
-            self.optimizer = Lion(
-                self.model.parameters(), lr=lr, weight_decay=weight_decay, betas=betas
-            )
-        else:
-            self.optimizer = torch.optim.AdamW(
-                self.model.parameters(), lr=lr, weight_decay=weight_decay, betas=betas
-            )
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(), lr=lr, weight_decay=weight_decay, betas=betas
+        )
 
         # LR scheduler
         self.scheduler = torch.optim.lr_scheduler.MultiStepLR(
@@ -813,7 +795,7 @@ class VRPTuner:
                         ls_info = f"|LS:{ls_update_count}" if use_ls else ""
                         progress.update(
                             train_task,
-                            description=f"🙏> {train_label} | {metric_info}{ls_info}",
+                            description=f"{train_label} | {metric_info}{ls_info}",
                             advance=current_batch_size,
                         )
 
@@ -907,7 +889,7 @@ class VRPTuner:
             avg_gap = sum(r["aug_gap"] for r in results.values()) / len(results)
             avg_score = sum(r["aug_score"] for r in results.values()) / len(results)
             args.log(
-                f"Epoch {epoch} | Avg Aug Gap: {avg_gap:.2f}% | Avg Aug Score: {avg_score:.2f}"
+                f"Epoch {epoch} | Avg Aug Gap: {avg_gap:.3f}% | Avg Aug Score: {avg_score:.3f}"
             )
 
             if args.wandb != "" and not args.mute:

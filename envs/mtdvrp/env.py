@@ -123,10 +123,8 @@ def get_dataloader(dataset, batch_size, ddp=False, num_workers=0):
         )
 
     if isinstance(dataset, dict):
-        size_bs = {50: 1000, 100: 500, 200: 125, 300: 100}
-        batch_size = [
-            size_bs.get(int(x.split("_")[0]), 500) for x in list(dataset.keys())
-        ]
+        assert isinstance(batch_size, int)
+        batch_size = [batch_size for _ in list(dataset.keys())]
         return {
             name: get_single_dataloader(dset, bsize, ddp, num_workers)
             for (name, dset), bsize in zip(dataset.items(), batch_size)

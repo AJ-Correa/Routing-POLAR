@@ -1,3 +1,5 @@
+import time
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,6 +9,7 @@ import numpy as np
 import concurrent.futures
 import multiprocessing as mp
 from utils.search import _ls_instance_iterated
+from utils.vrplib_helpers import vrplib_round_func_from_id
 
 from utils.functions import batchify, gather_by_index
 
@@ -133,7 +136,7 @@ class VRPModel(nn.Module):
             actions_list.append(pomo_customer_starts)
             td.set("action", pomo_customer_starts)
             td = env.step(td)["next"]
-
+        
         # Prepare decoder cache for efficient attention
         decoder_k = reshape_by_heads(
             self.decoder.Wk(node_embed), head_num=args.model_params["head_num"]
@@ -143,19 +146,12 @@ class VRPModel(nn.Module):
         )
         decoder_single_head_k = node_embed.transpose(1, 2)
 
-        # Precompute static node-node distance bias once per problem instance
-        d_nn = torch.cdist(node_coords, node_coords)
-        log_d_nn = -1 * torch.nan_to_num(
-            torch.log(d_nn), nan=0.0, posinf=0.0, neginf=0.0
-        )
-
         cache = PrecomputedCache(
             node_embed,
             decoder_k,
             decoder_v,
             decoder_single_head_k,
             node_coords,
-            log_d_nn,
         )
 
         # Autoregressive decoding loop
@@ -258,19 +254,12 @@ class VRPModel(nn.Module):
         )
         decoder_single_head_k = node_embed.transpose(1, 2)
 
-        # Precompute static node-node distance bias (skipped if embeddings were provided)
-        d_nn = torch.cdist(node_coords, node_coords)
-        log_d_nn = -1 * torch.nan_to_num(
-            torch.log(d_nn), nan=0.0, posinf=0.0, neginf=0.0
-        )
-
         cache = PrecomputedCache(
             node_embed,
             decoder_k,
             decoder_v,
             decoder_single_head_k,
             node_coords,
-            log_d_nn,
         )
 
         # Replay tour steps and compute log-probs
@@ -380,17 +369,13 @@ class VRPModel(nn.Module):
             self.decoder.Wv(node_embed), head_num=args.model_params["head_num"]
         )
         decoder_single_head_k = node_embed.transpose(1, 2)
-        d_nn = torch.cdist(node_coords, node_coords)
-        log_d_nn = -1 * torch.nan_to_num(
-            torch.log(d_nn), nan=0.0, posinf=0.0, neginf=0.0
-        )
+
         cache = PrecomputedCache(
             node_embed,
             decoder_k,
             decoder_v,
             decoder_single_head_k,
             node_coords,
-            log_d_nn,
         )
 
         # Autoregressive decoding
@@ -457,6 +442,8 @@ class VRPModel(nn.Module):
         env,
         ls_nb_granular: int = 20,
         num_iters: int = 5,
+        stop_condition: str = "iterations",
+        num_seconds: float | None = None,
         dmax: int = 10,
         dmin: int = 5,
         acceptance_rate: float = 0.01,
@@ -466,6 +453,7 @@ class VRPModel(nn.Module):
         batch_size = td_orig.batch_size[0]
         device = td_orig.device
         po_B = args.trainer_params.get("po_B", None)
+        neural_start = time.perf_counter()
 
         # ═════════════════════════════════════════════════════════════════
         # ONCE: encode + build static decoder cache (never changes)
@@ -480,17 +468,13 @@ class VRPModel(nn.Module):
             self.decoder.Wv(node_embed), head_num=args.model_params["head_num"]
         )
         decoder_shk = node_embed.transpose(1, 2)
-        d_nn = torch.cdist(node_coords, node_coords)
-        log_d_nn = -1 * torch.nan_to_num(
-            torch.log(d_nn), nan=0.0, posinf=0.0, neginf=0.0
-        )
+
         static_cache = PrecomputedCache(
             node_embed,
             decoder_k,
             decoder_v,
             decoder_shk,
             node_coords,
-            log_d_nn,
         )
 
         # ═════════════════════════════════════════════════════════════════
@@ -505,6 +489,18 @@ class VRPModel(nn.Module):
         tw_np = td_cpu["time_windows"].numpy()
         svc_np = td_cpu["service_time"].numpy()
         workers = min(batch_size, os.cpu_count() or 1)
+
+        if "num_depots" in td_cpu.keys():
+            nd_raw = td_cpu["num_depots"].numpy()
+            num_depots_np = nd_raw[:, 0] if nd_raw.ndim == 2 else nd_raw
+        else:
+            num_depots_np = np.ones(batch_size, dtype=np.int64)
+
+        # Instance-specific mixed-backhaul flags from p_s_tag[:, 5].
+        if "p_s_tag" in td_cpu.keys():
+            mixed_backhaul_flags = td_cpu["p_s_tag"][:, 5].numpy().astype(bool)
+        else:
+            mixed_backhaul_flags = np.zeros(batch_size, dtype=bool)
 
         best_reward = None
         best_tours = None
@@ -540,7 +536,7 @@ class VRPModel(nn.Module):
             td_dec = env.step(td_dec)["next"]
 
         # ── REUSE static cache instead of rebuilding ─────────────────
-        cache = static_cache  # ← was: rebuild decoder_k, decoder_v, d_nn, etc.
+        cache = static_cache
 
         # Autoregressive decode
         while not td_dec["done"].all():
@@ -597,6 +593,11 @@ class VRPModel(nn.Module):
                 best_tours,
             )
 
+        ils_time_limit = None
+        if stop_condition == "time":
+            budget = float(num_seconds) if num_seconds is not None else 0.0
+            ils_time_limit = max(0.0, budget - (time.perf_counter() - neural_start))
+
         # ── Search ──────────────────────────────────
         best_np = best_tours.cpu().numpy()  # ← only this moves per iteration
 
@@ -604,6 +605,7 @@ class VRPModel(nn.Module):
         ls_tours_lst = [None] * batch_size
         futures_map = {}
 
+        use_vrplib = "vrplib_coords" in td_cpu.keys()
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=workers,
             mp_context=mp.get_context("spawn"),
@@ -621,8 +623,28 @@ class VRPModel(nn.Module):
                     else bool(open_np[i]),
                     tw_np[i],
                     svc_np[i],
+                    int(num_depots_np[i]),
                 )
                 seed = (i * 100003) & 0xFFFFFFFF
+
+                vrplib_opts = None
+                if use_vrplib:
+                    cap = td_cpu["vrplib_capacity"]
+                    cap_i = int(cap[i, 0]) if cap.ndim > 1 else int(cap[i])
+                    if "vrplib_round_func_id" in td_cpu.keys():
+                        rid = int(td_cpu["vrplib_round_func_id"][i].reshape(-1)[0].item())
+                        round_func = vrplib_round_func_from_id(rid)
+                    else:
+                        round_func = "round"
+                    opts = {
+                        "coords": td_cpu["vrplib_coords"][i].numpy(),
+                        "demands": td_cpu["vrplib_demands"][i].numpy(),
+                        "capacity": cap_i,
+                        "round_func": round_func,
+                    }
+                    if "vrplib_edge_weight" in td_cpu.keys():
+                        opts["edge_weight"] = td_cpu["vrplib_edge_weight"][i].numpy()
+                    vrplib_opts = opts
 
                 futures_map[
                     pool.submit(
@@ -632,10 +654,13 @@ class VRPModel(nn.Module):
                         ls_nb_granular,
                         seed,
                         num_iters=num_iters,
+                        time_limit=ils_time_limit,
                         dmax=dmax,
                         dmin=dmin,
                         acceptance_rate=acceptance_rate,
                         no_improvement=no_improvement,
+                        vrplib_options=vrplib_opts,
+                        mixed_backhaul=bool(mixed_backhaul_flags[i]),
                     )
                 ] = i
 
@@ -645,6 +670,10 @@ class VRPModel(nn.Module):
 
         # Update best with LS results
         ls_reward = torch.tensor(-ls_costs, dtype=torch.float32, device=device)
-        best_reward = torch.maximum(best_reward, ls_reward)
+        if use_vrplib:
+            # LS costs are already in CVRPLIB integer units (metric='vrplib').
+            best_reward = ls_reward
+        else:
+            best_reward = torch.maximum(best_reward, ls_reward)
 
         return best_reward

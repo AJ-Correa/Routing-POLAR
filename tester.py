@@ -30,6 +30,7 @@ from utils.functions import (
     batchify,
 )
 from utils.search import Search
+from utils.vrplib_helpers import VRPLIB_ROUND_FUNC_IDS, default_vrplib_round_func
 
 
 def normalize_coord(coord: torch.Tensor) -> Tuple[torch.Tensor, float]:
@@ -100,22 +101,10 @@ class VRPTester:
         excel_data_a8gap = []  # List of (problem, aug_gap) tuples
 
         tmp_test_metric_label = ["NO_AUG Obj.", "NO_AUG Gap", "AUG Obj.", "AUG Gap"]
-
-        def rank(name):
-            parts = name.lower().split("_")
-            variant = parts[1] if len(parts) > 1 else name.lower()
-            if variant == "vrptw":
-                return 0
-            if variant == "ovrp":
-                return 1
-            if variant == "vrpb":
-                return 2
-            return 99
-        ordered_items = sorted(test_dataloader.items(), key=lambda x: rank(x[0]))
         
-        for data_idx, (dataset_name, dataloader) in enumerate(ordered_items):
+        for data_idx, (dataset_name, dataloader) in enumerate(test_dataloader.items()):
             all_metric = []
-            eval_label = f"Eval {dataset_name:7s} {str(data_idx + 1).zfill(3)}/{str(dataset_num).zfill(3)} | Epoch{str(epoch).zfill(3)}"
+            eval_label = f"Eval {dataset_name} {str(data_idx + 1).zfill(3)}/{str(dataset_num).zfill(3)} | Epoch{str(epoch).zfill(3)}"
 
             with Progress(
                 SpinnerColumn(),
@@ -154,22 +143,27 @@ class VRPTester:
                         
                         if args.tester_params.get("use_refinement", False):
                             reward = self.model.iterative_refinement(
-                            td_aug,
-                            self.env,
-                            ls_nb_granular=args.tester_params.get("ls_nb_granular", 20),
-                            num_iters=args.tester_params.get("num_iters", 75),
-                            dmax=args.tester_params.get("dmax", 10),
-                            dmin=args.tester_params.get("dmin", 5),
-                            acceptance_rate=args.tester_params.get(
-                                "acceptance_rate", 0.01
-                            ),
-                            no_improvement=args.tester_params.get(
-                                "no_improvement", 8
-                            ),
-                        )
+                                td_aug,
+                                self.env,
+                                ls_nb_granular=args.tester_params.get("ls_nb_granular", 20),
+                                num_iters=args.tester_params.get("num_iters", 75),
+                                stop_condition=args.tester_params.get(
+                                    "stop_condition", "iterations"
+                                ),
+                                num_seconds=args.tester_params.get("num_seconds", 100.0),
+                                dmax=args.tester_params.get("dmax", 10),
+                                dmin=args.tester_params.get("dmin", 5),
+                                acceptance_rate=args.tester_params.get(
+                                    "acceptance_rate", 0.01
+                                ),
+                                no_improvement=args.tester_params.get(
+                                    "no_improvement", 8
+                                ),
+                            )
                         else:
                             out = self.model(td_aug, self.env)
                             reward = out["reward"]
+                            del out, batch_td
 
                         all_reward = reward.view(
                             -1, self.augmentation.num_augment, batch_size
@@ -355,7 +349,7 @@ class VRPTester:
                 if not os.path.exists(test_file):
                     continue
 
-                eval_label = f"Eval {variant_name:7s}_{size} {str(dataset_idx).zfill(3)}/{str(dataset_num).zfill(3)} | Epoch{str(epoch).zfill(3)}"
+                eval_label = f"Eval {variant_name}_{size} {str(dataset_idx).zfill(3)}/{str(dataset_num).zfill(3)} | Epoch{str(epoch).zfill(3)}"
 
                 with Progress(
                     SpinnerColumn(),
@@ -367,8 +361,6 @@ class VRPTester:
                     console=self.console,
                     transient=True,
                 ) as progress:
-                    eval_task = progress.add_task(eval_label, total=1)
-
                     # Load data
                     td = load_npz_to_tensordict(test_file).to("cuda")
 
@@ -381,10 +373,13 @@ class VRPTester:
 
                     # Build p_s_tag
                     td = self._build_p_s_tag(td, variant_name, size)
+                    td = self._add_missing_fields(td)
 
                     # Run evaluation
                     batch_size = td.batch_size[0]
-                    eval_batch_size = min(batch_size, 500)
+                    eval_batch_size = min(batch_size, int(args.env["test_batch_size"]))
+                    total_eval_batches = (batch_size + eval_batch_size - 1) // eval_batch_size
+                    eval_task = progress.add_task(eval_label, total=total_eval_batches)
 
                     all_scores = []
                     all_aug_scores = []
@@ -392,6 +387,11 @@ class VRPTester:
                     for start_idx in range(0, batch_size, eval_batch_size):
                         end_idx = min(start_idx + eval_batch_size, batch_size)
                         batch_td = td[start_idx:end_idx]
+                        batch_opt = (
+                            opt_costs[start_idx:end_idx].abs()
+                            if opt_costs is not None
+                            else None
+                        )
 
                         batch_td = self.env.reset(td=batch_td)
 
@@ -403,19 +403,27 @@ class VRPTester:
                             batch_td = self.augmentation(batch_td)
                             if args.tester_params.get("use_refinement", False):
                                 reward = self.model.iterative_refinement(
-                                batch_td,
-                                self.env,
-                                ls_nb_granular=args.tester_params.get("ls_nb_granular", 20),
-                                num_iters=args.tester_params.get("num_iters", 75),
-                                dmax=args.tester_params.get("dmax", 10),
-                                dmin=args.tester_params.get("dmin", 5),
-                                acceptance_rate=args.tester_params.get(
-                                    "acceptance_rate", 0.01
-                                ),
-                                no_improvement=args.tester_params.get(
-                                    "no_improvement", 8
-                                ),
-                            )
+                                    batch_td,
+                                    self.env,
+                                    ls_nb_granular=args.tester_params.get(
+                                        "ls_nb_granular", 20
+                                    ),
+                                    num_iters=args.tester_params.get("num_iters", 75),
+                                    stop_condition=args.tester_params.get(
+                                        "stop_condition", "iterations"
+                                    ),
+                                    num_seconds=args.tester_params.get(
+                                        "num_seconds", 100.0
+                                    ),
+                                    dmax=args.tester_params.get("dmax", 10),
+                                    dmin=args.tester_params.get("dmin", 5),
+                                    acceptance_rate=args.tester_params.get(
+                                        "acceptance_rate", 0.01
+                                    ),
+                                    no_improvement=args.tester_params.get(
+                                        "no_improvement", 8
+                                    ),
+                                )
                             else:
                                 out = self.model(batch_td, self.env)
                                 reward = out["reward"]
@@ -425,11 +433,39 @@ class VRPTester:
                         )
                         batch_reward, _ = batch_reward.max(dim=0)
 
-                        all_scores.append(-batch_reward[0, :].float())
+                        batch_score = -batch_reward[0, :].float()
+                        all_scores.append(batch_score)
                         aug_reward, _ = batch_reward.max(dim=0)
-                        all_aug_scores.append(-aug_reward.float())
+                        batch_aug_score = -aug_reward.float()
+                        all_aug_scores.append(batch_aug_score)
 
-                        del out, batch_td
+                        if batch_opt is not None:
+                            b_score_abs = batch_score.abs()
+                            b_aug_abs = batch_aug_score.abs()
+                            batch_gap = ((b_score_abs - batch_opt) * 100 / batch_opt).mean().item()
+                            batch_aug_gap = (
+                                ((b_aug_abs - batch_opt) * 100 / batch_opt).mean().item()
+                            )
+                            batch_metric = [
+                                b_score_abs.mean().item(),
+                                batch_gap,
+                                b_aug_abs.mean().item(),
+                                batch_aug_gap,
+                            ]
+                        else:
+                            batch_metric = [
+                                batch_score.mean().item(),
+                                0.0,
+                                batch_aug_score.mean().item(),
+                                0.0,
+                            ]
+                        batch_metric_info = metric2str(tmp_test_metric_label, batch_metric)
+
+                        progress.update(
+                            eval_task,
+                            advance=1,
+                            description=f"{eval_label}|{batch_metric_info}",
+                        )
                         torch.cuda.empty_cache()
 
                     scores = torch.cat(all_scores)
@@ -465,9 +501,7 @@ class VRPTester:
                     excel_data_a8gap.append({"problem": key, "gap": aug_gap})
 
                     metric_info = metric2str(tmp_test_metric_label, metric_list)
-                    progress.update(
-                        eval_task, advance=1, description=f"{eval_label}|{metric_info}"
-                    )
+                    progress.update(eval_task, description=f"{eval_label}|{metric_info}")
 
                     # Force cleanup
                     gc.collect()
@@ -593,6 +627,48 @@ class VRPTester:
         td["p_s_tag"] = p_s_tag
         return td
 
+    def _add_missing_fields(self, td: TensorDict) -> TensorDict:
+        """Add missing fields with generator-consistent defaults."""
+        batch = td.batch_size[0]
+        n_locs = td["locs"].shape[1]
+        num_depots = td["num_depots"][0].item() if "num_depots" in td.keys() else 1
+        device = td["locs"].device
+        
+        if num_depots > 1:
+            if "demand_backhaul" not in td.keys():
+                td["demand_backhaul"] = torch.zeros(batch, n_locs - num_depots, device=device)
+        else:
+            if "demand_backhaul" not in td.keys():
+                td["demand_backhaul"] = torch.zeros(batch, n_locs, device=device)
+            
+            if td["demand_linehaul"].shape[1] != n_locs:
+                td["demand_linehaul"] = torch.cat([torch.zeros(batch,  n_locs - td["demand_linehaul"].shape[1], device=device), td["demand_linehaul"]], dim=1)
+            if td["demand_backhaul"].shape[1] != n_locs:
+                td["demand_backhaul"] = torch.cat([torch.zeros(batch,  n_locs - td["demand_backhaul"].shape[1], device=device), td["demand_backhaul"]], dim=1)
+        
+        if "distance_limit" not in td.keys():
+            td["distance_limit"] = torch.full((batch, 1), float("inf"), device=device)
+        
+        if "service_time" not in td.keys():
+            td["service_time"] = torch.zeros(batch, n_locs, device=device)
+        elif td["service_time"].shape[1] == n_locs - num_depots:
+            td["service_time"] = torch.cat(
+                [torch.zeros(batch, num_depots, device=device), td["service_time"]], dim=1
+            )
+        
+        if "time_windows" not in td.keys():
+            tw = torch.zeros(batch, n_locs, 2, device=device)
+            tw[..., 1] = float("inf")
+            td["time_windows"] = tw
+        
+        if "capacity_original" not in td.keys():
+            td["capacity_original"] = torch.ones(batch, 1, device=device)
+        
+        if "open_route" not in td.keys():
+            td["open_route"] = torch.zeros(batch, 1, dtype=torch.bool, device=device)
+
+        return td
+
     @torch.inference_mode()
     def test_lib(self, epoch: int) -> Dict[str, float]:
         """Run evaluation on CVRPLIB benchmark instances.
@@ -606,8 +682,7 @@ class VRPTester:
         args = self.args
         self.model.eval()
 
-        # all_test_dataset = ["A", "B", "F", "P", "X"]
-        all_test_dataset = ["X"]
+        all_test_dataset = ["A", "B", "F", "P", "X"]
         size_limit = 200
 
         all_dataset_dict = {
@@ -655,12 +730,23 @@ class VRPTester:
                 original_capacity = problem["capacity"]
                 demand = torch.tensor(problem["demand"][1:]).float() / original_capacity
                 original_capacity = torch.tensor(original_capacity)[None]
+                lib_round_func = default_vrplib_round_func(dataset)
 
                 td_instance = TensorDict(
                     {
                         "locs": coords_norm.unsqueeze(0),
                         "demand_linehaul": demand.unsqueeze(0),
                         "capacity_original": original_capacity.unsqueeze(0),
+                        # CVRPLIB-aligned LS (PyVRP round_func); neural still uses normalized locs.
+                        "vrplib_coords": coords.unsqueeze(0),
+                        "vrplib_demands": torch.tensor(problem["demand"], dtype=torch.float32).unsqueeze(0),
+                        "vrplib_capacity": original_capacity.unsqueeze(0),
+                        "vrplib_round_func_id": torch.tensor(
+                            [VRPLIB_ROUND_FUNC_IDS[lib_round_func]], dtype=torch.long
+                        ),
+                        "vrplib_edge_weight": torch.tensor(
+                            problem["edge_weight"], dtype=torch.float32
+                        ).unsqueeze(0),
                     },
                     batch_size=[1],
                 )
@@ -706,20 +792,25 @@ class VRPTester:
 
                     if args.tester_params.get("use_refinement", False):
                         reward = self.model.iterative_refinement(
-                        td,
-                        self.env,
-                        ls_nb_granular=args.tester_params.get("ls_nb_granular", 20),
-                        num_iters=args.tester_params.get("num_iters", 75),
-                        dmax=args.tester_params.get("dmax", 10),
-                        dmin=args.tester_params.get("dmin", 5),
-                        acceptance_rate=args.tester_params.get(
-                            "acceptance_rate", 0.01
-                        ),
-                        no_improvement=args.tester_params.get("no_improvement", 8),
-                    )
+                            td,
+                            self.env,
+                            ls_nb_granular=args.tester_params.get("ls_nb_granular", 20),
+                            num_iters=args.tester_params.get("num_iters", 75),
+                            stop_condition=args.tester_params.get(
+                                "stop_condition", "iterations"
+                            ),
+                            num_seconds=args.tester_params.get("num_seconds", 100.0),
+                            dmax=args.tester_params.get("dmax", 10),
+                            dmin=args.tester_params.get("dmin", 5),
+                            acceptance_rate=args.tester_params.get(
+                                "acceptance_rate", 0.01
+                            ),
+                            no_improvement=args.tester_params.get("no_improvement", 8),
+                        )
                     else:
                         out = self.model(td, self.env)
                         reward = out["reward"]
+                        del out, batch_td
 
                 use_time = time.time() - start_time
 
@@ -731,7 +822,11 @@ class VRPTester:
                 aug_reward, _ = all_reward.max(dim=0)
                 aug_score = -aug_reward.float().item()
 
-                score, aug_score = ceil(score * scale), ceil(aug_score * scale)
+                if "vrplib_coords" in td_reset.keys():
+                    # LS / refinement costs are already CVRPLIB integers.
+                    score, aug_score = ceil(score), ceil(aug_score)
+                else:
+                    score, aug_score = ceil(score * scale), ceil(aug_score * scale)
                 gap = (score - opt) / opt * 100
                 aug_gap = (aug_score - opt) / opt * 100
 

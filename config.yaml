@@ -25,17 +25,19 @@ model_params:
 
 
 # =============================================================================
-# TESTER PARAMETERS (TEST-TIME REFINEMENT)
+# NEURAL-ANCHORED ITERATED LOCAL SEARCH PARAMETERS
 # =============================================================================
 
 tester_params:
-  use_refinement: true        # Use test-time refinement
-  ls_nb_granular: 20          # LS neighbourhood granularity
-  num_iters: 100              # Number of ILS iterations
-  acceptance_rate: 0.001      # Accept solutions with cost up to current_cost * (1 + acceptance_rate)
-  no_improvement: 8           # Reset to best tour after this many rejected ILS iterations
-  dmax: 25                    # Initial perturbation degree (vertices removed)
-  dmin: 2                     # Final perturbation degree (vertices removed)
+  use_refinement: true         # Use NAILS refinement
+  ls_nb_granular: 20           # LS neighbourhood granularity
+  stop_condition: 'iterations' # 'iterations' or 'time' (ILS stopping criterion)
+  num_iters: 100               # Number of NAILS iterations (when stop_condition=iterations)
+  num_seconds: 100.0           # Total wall-clock budget incl. neural decode (when stop_condition=time)
+  acceptance_rate: 0.0000      # Accept solutions with cost up to current_cost * (1 + acceptance_rate)
+  no_improvement: 8            # Reset to best tour after this many rejected NAILS iterations
+  dmax: 25                     # Initial perturbation degree (vertices removed)
+  dmin: 2                      # Final perturbation degree (vertices removed)
 
 
 # =============================================================================
@@ -67,13 +69,12 @@ optimizer_params:
   optimizer:
     lr: 3e-4                     # Learning rate
     weight_decay: 1e-6           # L2 regularization
-    beta1: 0.9                   # Optimizer beta1 (Adam: momentum; Lion: gradient momentum) 0.95 for lion, 0.9 for adamw
-    beta2: 0.999                 # Optimizer beta2 (Adam: second-moment; Lion: update momentum) 0.98 for lion, 0.999 for adamw
+    beta1: 0.9                   # Optimizer beta1 momentum
+    beta2: 0.999                 # Optimizer beta2 second-momentum
   scheduler:
     name: 'MultiStepLR'          # LR scheduler type ('MultiStepLR' by default, others are not implemented)
-    milestones: [270, 295]       # Epochs to decay LR [180, 200, 270] for lion; [270, 295] for adamw
-    gamma: 0.1                   # LR decay factor 0.33 for lion, 0.1 for adamw
-  use_lion: false                # Use Lion optimizer instead of AdamW
+    milestones: [270, 295]       # Epochs to decay LR
+    gamma: 0.1                   # LR decay factor
 
 
 # =============================================================================
@@ -89,7 +90,7 @@ tuner_params:
   
   # Loss function
   loss_function: 'po'         # 'po' (Preference Optimization) or 'rl' (REINFORCE)
-  po_alpha: 0.03              # PO temperature parameter
+  po_alpha: 0.05              # PO temperature parameter
   po_B: null                  # Number of solutions generated per instance (null = all POMO starts)
   
   # Local search
@@ -112,13 +113,12 @@ tuner_optimizer_params:
   optimizer:
     lr: 1e-4                  # Learning rate for fine-tuning (overridden by --lr)
     weight_decay: 1e-6        # L2 regularization
-    beta1: 0.9                # Optimizer beta1 (Adam: momentum; Lion: gradient momentum)
-    beta2: 0.999              # Optimizer beta2 (Adam: second-moment; Lion: update momentum)
+    beta1: 0.9                # Optimizer beta1 momentum
+    beta2: 0.999              # Optimizer beta2 second-momentum
   scheduler:
     name: 'MultiStepLR'       # LR scheduler type ('MultiStepLR' by default, others are not implemented)
     milestones: [8]           # Epochs to decay LR
     gamma: 0.1                # LR decay factor
-  use_lion: false             # Use Lion optimizer instead of AdamW
 
 
 # =============================================================================
@@ -134,7 +134,7 @@ env:
   test_epoch: [50, 150]       # Additional test epochs
   test_interval: 10           # Test every N epochs during training
   test_episodes: 1000         # Number of test instances per evaluation
-  test_batch_size: 1000       # Batch size for testing
+  test_batch_size: 100        # Batch size for testing
   data_dir: './data'          # Directory containing datasets
   
   # Test configuration indices (reference lists below)

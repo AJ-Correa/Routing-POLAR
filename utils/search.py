@@ -1,7 +1,9 @@
+import time
+
 import pyvrp
 from pyvrp import SolveParams
 from pyvrp.PenaltyManager import PenaltyManager
-from typing import List, Tuple, Optional
+from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
 from pyvrp._pyvrp import Route
 from pyvrp._pyvrp import (
     RandomNumberGenerator,
@@ -16,6 +18,7 @@ from pyvrp.crossover import selective_route_exchange as srex
 from pyvrp import Client, Depot, ProblemData, VehicleType, solve as _solve
 import numpy as np
 from scipy.spatial.distance import cdist
+from .vrplib_helpers import compute_vrplib_cost_matrix, resolve_round_func
 
 _BOOSTER_SCHEDULE = (12, 200, 3_000, 50_000, 1_000_000)
 
@@ -78,13 +81,13 @@ class PerturbationHeuristics:
         """Python wrapper → C extension. Returns list like Python."""
         tour_arr = np.asarray(partial_tour, dtype=np.int64)
         removed_arr = np.asarray(removed_vertices, dtype=np.int64)
-        return insertion_by_cost(tour_arr, removed_arr, self.cost_matrix)
-    
+        return insertion_by_cost(tour_arr, removed_arr, self.cost_matrix, self.num_depots)
+
     def insertion_by_distance(self, partial_tour, removed_vertices):
         """Insert removed vertices closest to their nearest neighbor in tour."""
         tour_arr = np.asarray(partial_tour, dtype=np.int64)
         removed_arr = np.asarray(removed_vertices, dtype=np.int64)
-        return insertion_by_distance(tour_arr, removed_arr, self.cost_matrix)
+        return insertion_by_distance(tour_arr, removed_arr, self.cost_matrix, self.num_depots)
 
     def concentric_removal(self, tour, omega):
         """Remove omega vertices closest to a randomly chosen seed vertex."""
@@ -149,17 +152,83 @@ class Search:
         num_depots=1,
         mixed_backhaul=False,
         nb_granular=20,
+        metric: Literal["normalized", "vrplib"] = "normalized",
+        round_func: Union[str, Callable[[np.ndarray], np.ndarray]] = "round",
+        vehicle_capacity: Optional[int] = None,
+        edge_weight: Optional[np.ndarray] = None,
+        vrplib_options: Optional[dict] = None,
     ):
-        """Constructs the initial search model for the input instance given."""
+        """
+        Construct a PyVRP local-search model.
+
+        metric="normalized" (default)
+            Coordinates in [0, 1], fractional demands, capacity 1000 — training / synthetic.
+        metric="vrplib"
+            Integer CVRPLIB geometry and costs (same rounding as ``pyvrp.read``).
+            Pass raw ``node_coord``, integer ``demand`` (depot included), and file capacity.
+            Alternatively pass *vrplib_options* with keys
+            ``coords``, ``demands``, ``capacity``, optional ``round_func``, ``edge_weight``.
+        """
+        if vrplib_options is not None:
+            metric = "vrplib"
+            locs = vrplib_options["coords"]
+            demands_linehauls = vrplib_options["demands"]
+            round_func = vrplib_options.get("round_func", round_func)
+            vehicle_capacity = vrplib_options["capacity"]
+            edge_weight = vrplib_options.get("edge_weight", edge_weight)
+
+        self.metric = metric
         self.num_depots = num_depots
         self.num_customers = len(locs) - self.num_depots
-        self.scaler = 1_000
         self.eps = 1e-30
 
-        nd = num_depots
+        if metric == "vrplib":
+            if vehicle_capacity is None:
+                raise ValueError("vehicle_capacity is required when metric='vrplib'.")
+            self._init_vrplib_problem(
+                locs=locs,
+                demands_linehauls=demands_linehauls,
+                demands_backhauls=demands_backhauls,
+                distance_limit=distance_limit,
+                open_route=open_route,
+                time_windows=time_windows,
+                service_times=service_times,
+                vehicle_capacity=vehicle_capacity,
+                round_func=round_func,
+                edge_weight=edge_weight,
+                mixed_backhaul=mixed_backhaul,
+                nb_granular=nb_granular,
+            )
+        else:
+            self._init_normalized_problem(
+                locs=locs,
+                demands_linehauls=demands_linehauls,
+                demands_backhauls=demands_backhauls,
+                distance_limit=distance_limit,
+                open_route=open_route,
+                time_windows=time_windows,
+                service_times=service_times,
+                mixed_backhaul=mixed_backhaul,
+                nb_granular=nb_granular,
+            )
+
+    def _init_normalized_problem(
+        self,
+        locs,
+        demands_linehauls,
+        demands_backhauls,
+        distance_limit,
+        open_route,
+        time_windows,
+        service_times,
+        mixed_backhaul,
+        nb_granular,
+    ):
+        """Training / synthetic instances: coords in [0,1], internal scale 1000."""
+        self.scaler = 1_000
+        nd = self.num_depots
         nc = self.num_customers
 
-        # ── vectorised pre-scaling ────
         locs_s = np.asarray(locs) * self.scaler
         dlin_s = np.asarray(demands_linehauls) * self.scaler
         dbac_s = np.asarray(demands_backhauls) * self.scaler
@@ -172,27 +241,100 @@ class Search:
                 np.asarray(demands_linehauls),
                 np.asarray(demands_backhauls),
                 open_route=open_route,
-                max_distance=distance_limit,
                 num_depots=nd,
                 mixed_backhaul=mixed_backhaul,
             ),
         )
         cost_matrix = np.round(cost_matrix * self.scaler)
 
-        xs_i = locs_s[:, 0]
-        ys_i = locs_s[:, 1]
-        dlin_i = np.round(dlin_s)
-        dbac_i = np.round(dbac_s)
-        svc_i = (svc_s + self.eps * self.scaler)
+        depots, clients, vehicle_types, tw_finite = self._build_nodes_and_vehicles(
+            xs_i=locs_s[:, 0],
+            ys_i=locs_s[:, 1],
+            dlin_i=np.round(dlin_s),
+            dbac_i=np.round(dbac_s),
+            svc_i=svc_s + self.eps * self.scaler,
+            tw_arr=tw_arr,
+            distance_limit=distance_limit,
+            capacity=int(round((1 - self.eps) * self.scaler)),
+        )
+        self._finish_init(cost_matrix, depots, clients, vehicle_types, nb_granular)
+
+    def _init_vrplib_problem(
+        self,
+        locs,
+        demands_linehauls,
+        demands_backhauls,
+        distance_limit,
+        open_route,
+        time_windows,
+        service_times,
+        vehicle_capacity,
+        round_func,
+        edge_weight,
+        mixed_backhaul,
+        nb_granular,
+    ):
+        """CVRPLIB / benchmark instances: integer costs aligned with pyvrp.read."""
+        self.scaler = 1
+        rf = resolve_round_func(round_func)
+
+        cost_matrix, coords = compute_vrplib_cost_matrix(
+            locs,
+            round_func=round_func,
+            edge_weight=edge_weight,
+        )
+
+        dlin_i = rf(np.asarray(demands_linehauls, dtype=np.float64))
+        dbac_i = np.zeros_like(dlin_i)  # CVRPLIB path is CVRP-only.
+        svc_i = rf(np.asarray(service_times, dtype=np.float64))
+        tw_arr = np.asarray(time_windows, dtype=np.float64)
+
+        cap_i = int(rf(np.atleast_1d(vehicle_capacity))[0])
+        depots, clients, vehicle_types, _ = self._build_nodes_and_vehicles(
+            xs_i=coords[:, 0],
+            ys_i=coords[:, 1],
+            dlin_i=dlin_i,
+            dbac_i=dbac_i,
+            svc_i=svc_i,
+            tw_arr=tw_arr,
+            distance_limit=distance_limit,
+            capacity=cap_i,
+            scale_coords=False,
+        )
+        self._finish_init(cost_matrix, depots, clients, vehicle_types, nb_granular)
+
+    def _build_nodes_and_vehicles(
+        self,
+        xs_i,
+        ys_i,
+        dlin_i,
+        dbac_i,
+        svc_i,
+        tw_arr,
+        distance_limit,
+        capacity: int,
+        scale_coords: bool = True,
+    ):
+        nd = self.num_depots
+        nc = self.num_customers
 
         tw_early_all = tw_arr[:, 0]
         tw_late_all = tw_arr[:, 1]
         tw_finite = np.isfinite(tw_early_all) & np.isfinite(tw_late_all)
 
-        _safe_early = np.where(tw_finite, tw_early_all, 0.0)
-        _safe_late = np.where(tw_finite, tw_late_all, 0.0)
-        tw_early_i = ((_safe_early + self.eps) * self.scaler)
-        tw_late_i = ((_safe_late - self.eps) * self.scaler)
+        if scale_coords:
+            _safe_early = np.where(tw_finite, tw_early_all, 0.0)
+            _safe_late = np.where(tw_finite, tw_late_all, 0.0)
+            tw_early_i = (_safe_early + self.eps) * self.scaler
+            tw_late_i = (_safe_late - self.eps) * self.scaler
+            svc_dur = svc_i
+        else:
+            rf = resolve_round_func("round")
+            _safe_early = np.where(tw_finite, tw_early_all, 0.0)
+            _safe_late = np.where(tw_finite, tw_late_all, 0.0)
+            tw_early_i = rf(_safe_early)
+            tw_late_i = rf(_safe_late)
+            svc_dur = rf(np.asarray(svc_i))
 
         depots = [Depot(x=int(xs_i[i]), y=int(ys_i[i])) for i in range(nd)]
 
@@ -205,7 +347,7 @@ class Search:
                         y=int(ys_i[i]),
                         delivery=[int(dlin_i[i])],
                         pickup=[int(dbac_i[i])],
-                        service_duration=int(svc_i[i]),
+                        service_duration=int(svc_dur[i]),
                         tw_early=int(tw_early_i[i]),
                         tw_late=int(tw_late_i[i]),
                     )
@@ -217,17 +359,21 @@ class Search:
                         y=int(ys_i[i]),
                         delivery=[int(dlin_i[i])],
                         pickup=[int(dbac_i[i])],
-                        service_duration=int(svc_i[i]),
+                        service_duration=int(svc_dur[i]),
                     )
                 )
 
-        cap_i = int(round((1 - self.eps) * self.scaler))
-        max_dist_i = (
-            int((distance_limit - self.eps) * self.scaler) if np.isfinite(distance_limit) else None
-        )
+        max_dist_i = None
+        if np.isfinite(distance_limit):
+            max_dist_i = (
+                int((distance_limit - self.eps) * self.scaler)
+                if scale_coords
+                else int(resolve_round_func("round")(np.atleast_1d(distance_limit))[0])
+            )
+
         vehicle_types = []
         for i in range(nd):
-            vkw = dict(num_available=nc, start_depot=i, end_depot=i, capacity=[cap_i])
+            vkw = dict(num_available=nc, start_depot=i, end_depot=i, capacity=[capacity])
             if max_dist_i is not None:
                 vkw["max_distance"] = max_dist_i
             if tw_finite[i]:
@@ -235,11 +381,14 @@ class Search:
                 vkw["tw_late"] = int(tw_late_i[i])
             vehicle_types.append(VehicleType(**vkw))
 
+        return depots, clients, vehicle_types, tw_finite
+
+    def _finish_init(self, cost_matrix, depots, clients, vehicle_types, nb_granular):
         self._data = ProblemData(
             clients, depots, vehicle_types, [cost_matrix], [cost_matrix]
         )
         self.model = None
-        self._cost_matrix = cost_matrix / self.scaler
+        self._cost_matrix = cost_matrix.astype(np.float64) / self.scaler
 
         self.rng = RandomNumberGenerator(seed=0)
         self.params = SolveParams()
@@ -255,6 +404,49 @@ class Search:
         self._pm = PenaltyManager.init_from(self._data, self.params.penalty)
         self._neighbours = neighbours
         self._search = ls
+
+    @classmethod
+    def from_vrplib_instance(
+        cls,
+        instance: dict,
+        round_func: Union[str, Callable[[np.ndarray], np.ndarray]] = "round",
+        nb_granular: int = 20,
+        num_depots: int = 1,
+    ) -> "Search":
+        """
+        Build Search from a ``vrplib.read_instance`` dict (same metric as ``pyvrp.read``).
+        """
+        coords = instance["node_coord"]
+        demands = instance.get("demand", instance.get("linehaul"))
+        capacity = instance["capacity"]
+        n = len(coords)
+        tw = np.stack(
+            [np.zeros(n), np.full(n, np.inf)],
+            axis=1,
+            dtype=np.float64,
+        )
+        return cls(
+            coords,
+            demands,
+            np.zeros_like(demands, dtype=np.float64),
+            np.inf,
+            False,
+            tw,
+            np.zeros(n, dtype=np.float64),
+            num_depots=num_depots,
+            nb_granular=nb_granular,
+            metric="vrplib",
+            round_func=round_func,
+            vehicle_capacity=capacity,
+            edge_weight=instance.get("edge_weight"),
+        )
+
+    def tour_cost(self, tour) -> float:
+        """Total distance of *tour* in external units (CVRPLIB integers or normalized)."""
+        sol = self._tour_to_solution(tour)
+        if not sol.is_feasible():
+            return float("inf")
+        return sol.distance() / self.scaler
 
     def _make_search(self, seed: int) -> LocalSearch:
         """Create a new LocalSearch instance with the given seed."""
@@ -288,7 +480,8 @@ class Search:
             if starts[0] > 0:
                 pre = tour_arr[: starts[0]].tolist()
                 if pre:
-                    routes.insert(0, [0] + pre)
+                    first_depot = int(tour_arr[starts[0]])
+                    routes.insert(0, [first_depot] + pre)
 
         ls_routes = [Route(self._data, r[1:], r[0]) for r in routes]
         return Solution(self._data, ls_routes)
@@ -353,7 +546,8 @@ class Search:
             if starts[0] > 0:
                 pre = tour_arr[: starts[0]].tolist()
                 if pre:
-                    routes.insert(0, [0] + pre)
+                    first_depot = int(tour_arr[starts[0]])
+                    routes.insert(0, [first_depot] + pre)
 
         ls_routes = [Route(self._data, r[1:], r[0]) for r in routes]
         solution = Solution(self._data, ls_routes)
@@ -383,16 +577,20 @@ class Search:
         tour,
         seed: int = 0,
         num_iters: int = 5,
+        time_limit: Optional[float] = None,
         dmax: int = 10,
         dmin: int = 5,
         acceptance_rate: float = 0.01,
         no_improvement: int = 8,
     ):
         """
-        ILS-style: iterate perturbation → LS for num_iters cycles.
+        ILS-style: iterate perturbation → LS until num_iters or time_limit is reached.
         Always returns the best feasible solution found.
 
-        dmax/dmin schedule the number of vertices removed (omega) per iteration.
+        When *time_limit* is set (seconds), only the perturbation loop is timed; the
+        initial LS on the input tour is excluded. *num_iters* is ignored in that case.
+
+        dmax/dmin schedule omega over iteration index or elapsed-time fraction.
         acceptance_rate: accept if cost <= current_cost * (1 + acceptance_rate).
         no_improvement: reset current tour to best after this many rejections.
         """
@@ -403,6 +601,7 @@ class Search:
         if dmin > dmax:
             dmin = dmax
         no_improvement = max(1, int(no_improvement))
+        ratio = dmin / dmax
 
         sol = self._tour_to_solution(tour)
         search = self._make_search(seed)
@@ -414,11 +613,23 @@ class Search:
         current_tour = base_tour
         no_improvement_count = 0
 
-        for it in range(num_iters):
-            current_omega = max(
-                dmin,
-                int(round(dmax * ((dmin / dmax) ** (it / max(1, num_iters - 1))))),
-            )
+        timed = time_limit is not None and time_limit > 0.0
+        ils_start = time.perf_counter()
+        ils_deadline = ils_start + time_limit if timed else None
+        it = 0
+
+        while True:
+            if timed:
+                now = time.perf_counter()
+                if now >= ils_deadline:
+                    break
+                progress = min(1.0, (now - ils_start) / time_limit)
+            else:
+                if it >= num_iters:
+                    break
+                progress = it / max(1, num_iters - 1)
+
+            current_omega = max(dmin, int(round(dmax * (ratio**progress))))
 
             perturbed = perturbation.perturb(current_tour, omega=current_omega)
 
@@ -444,7 +655,8 @@ class Search:
 
             except Exception:
                 no_improvement_count += 1
-                continue
+
+            it += 1
 
         return best_cost, best_tour
 
@@ -455,14 +667,19 @@ def _ls_instance_iterated(
     nb_granular,
     seed,
     num_iters=5,
+    time_limit=None,
     dmax=10,
     dmin=5,
     acceptance_rate=0.01,
     no_improvement=8,
+    vrplib_options: Optional[dict] = None,
+    mixed_backhaul: bool = False,
 ):
     """
     Iterated perturbation + LS on one instance.
     Returns (cost, improved_tour) where improved_tour is guaranteed feasible.
+
+    When *vrplib_options* is set, LS uses CVRPLIB integer costs (see Search metric='vrplib').
     """
     (
         locs,
@@ -472,6 +689,7 @@ def _ls_instance_iterated(
         open_route,
         time_windows,
         service_time,
+        num_depots,
     ) = instance_args
     search = Search(
         locs,
@@ -481,15 +699,20 @@ def _ls_instance_iterated(
         open_route,
         time_windows,
         service_time,
+        num_depots=num_depots,
+        mixed_backhaul=mixed_backhaul,
         nb_granular=nb_granular,
+        vrplib_options=vrplib_options,
     )
     cost, improved_tour = search.iterated_perturbation_search(
         tour,
         seed=seed,
         num_iters=num_iters,
+        time_limit=time_limit,
         dmax=dmax,
         dmin=dmin,
         acceptance_rate=acceptance_rate,
         no_improvement=no_improvement,
     )
     return cost, improved_tour
+

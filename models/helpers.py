@@ -15,7 +15,6 @@ class PrecomputedCache:
     glimpse_val: Tensor
     logit_key: Tensor
     node_coords: Tensor = None  # (batch, seq_len, 2) for RoPE-2D
-    log_d_nn: Tensor = None     # (batch, N, N) for TSNR distance bias
 
     @property
     def fields(self):

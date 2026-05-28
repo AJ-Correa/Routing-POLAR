@@ -97,7 +97,6 @@ class VRP_Decoder(nn.Module):
                     C=context_embedding,
                     coords=cache.node_coords,
                     cur_nodes=cur_node,
-                    log_d_nn=cache.log_d_nn
                 )
 
                 # --- DYNAMICALLY RECOMPUTE KEYS/VALUES FOR CURRENT STEP ---
@@ -105,7 +104,7 @@ class VRP_Decoder(nn.Module):
                 glimpse_v = reshape_by_heads(self.Wv(new_node_embed), head_num=self.model_params["head_num"])
                 logit_k = new_node_embed.transpose(1, 2)
 
-                cache = PrecomputedCache(new_node_embed, glimpse_k, glimpse_v, logit_k, cache.node_coords, cache.log_d_nn)
+                cache = PrecomputedCache(new_node_embed, glimpse_k, glimpse_v, logit_k, cache.node_coords)
             else:
                 glimpse_k = cache.glimpse_key
                 glimpse_v = cache.glimpse_val

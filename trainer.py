@@ -34,7 +34,6 @@ from models.model import VRPModel
 from envs.mtvrp import MTVRPEnv, get_dataloader
 from envs.transformer import StateAugmentation
 from utils.search import Search
-from lion_pytorch import Lion
 from tester import VRPTester
 
 
@@ -137,21 +136,12 @@ class VRPTrainer:
         opt_conf = args.optimizer_params["optimizer"]
         betas = (float(opt_conf.get("beta1", 0.9)), float(opt_conf.get("beta2", 0.999)))
 
-        # Optimizer: Lion or AdamW
-        if args.optimizer_params["use_lion"]:
-            self.optimizer = Lion(
-                self.model.parameters(),
-                lr=opt_conf["lr"],
-                weight_decay=opt_conf.get("weight_decay", 0),
-                betas=betas,
-            )
-        else:
-            self.optimizer = torch.optim.AdamW(
-                self.model.parameters(),
-                lr=opt_conf["lr"],
-                weight_decay=opt_conf.get("weight_decay", 0),
-                betas=betas,
-            )
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=opt_conf["lr"],
+            weight_decay=opt_conf.get("weight_decay", 0),
+            betas=betas,
+        )
 
         # LR scheduler
         sched_conf = args.optimizer_params["scheduler"]

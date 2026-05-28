@@ -56,10 +56,8 @@ def get_dataloader(dataset, batch_size, ddp=False, num_workers=0):
         )
 
     if isinstance(dataset, dict):
-        size_bs = {50: 100, 100: 100, 200: 100, 300: 100}
-        batch_size = [
-            size_bs.get(int(x.split("_")[0]), 500) for x in list(dataset.keys())
-        ]
+        assert isinstance(batch_size, int)
+        batch_size = [batch_size for _ in list(dataset.keys())]
         return {
             name: get_single_dataloader(dset, bsize, ddp, num_workers)
             for (name, dset), bsize in zip(dataset.items(), batch_size)
@@ -276,44 +274,54 @@ class MTVRPEnv(EnvBase):
                 torch.full_like(demand_linehaul[..., :1], float("inf")),
             )
 
+            reset_fields = {
+                "locs": td["locs"],
+                "demand_backhaul": demand_backhaul,
+                "demand_linehaul": demand_linehaul,
+                "backhaul_class": backhaul_class,
+                "distance_limit": distance_limit,
+                "service_time": service_time,
+                "open_route": open_route,
+                "time_windows": time_windows,
+                "speed": td.get("speed", torch.ones_like(demand_linehaul[..., :1])),
+                "vehicle_capacity": td.get(
+                    "vehicle_capacity", torch.ones_like(demand_linehaul[..., :1])
+                ),
+                "capacity_original": td.get(
+                    "capacity_original", torch.ones_like(demand_linehaul[..., :1])
+                ),
+                "current_node": torch.zeros(
+                    (*batch_size,), dtype=torch.long, device=device
+                ),
+                "current_route_length": torch.zeros(
+                    (*batch_size, 1), dtype=torch.float32, device=device
+                ),
+                "current_time": torch.zeros(
+                    (*batch_size, 1), dtype=torch.float32, device=device
+                ),
+                "used_capacity_backhaul": torch.zeros(
+                    (*batch_size, 1), device=device
+                ),
+                "used_capacity_linehaul": torch.zeros(
+                    (*batch_size, 1), device=device
+                ),
+                "visited": torch.zeros(
+                    (*batch_size, td["locs"].shape[-2]),
+                    dtype=torch.bool,
+                    device=device,
+                ),
+            }
+            for key in (
+                "vrplib_coords",
+                "vrplib_demands",
+                "vrplib_capacity",
+                "vrplib_round_func_id",
+                "vrplib_edge_weight",
+            ):
+                if key in td.keys():
+                    reset_fields[key] = td.get(key)
             td_reset = TensorDict(
-                {
-                    "locs": td["locs"],
-                    "demand_backhaul": demand_backhaul,
-                    "demand_linehaul": demand_linehaul,
-                    "backhaul_class": backhaul_class,
-                    "distance_limit": distance_limit,
-                    "service_time": service_time,
-                    "open_route": open_route,
-                    "time_windows": time_windows,
-                    "speed": td.get("speed", torch.ones_like(demand_linehaul[..., :1])),
-                    "vehicle_capacity": td.get(
-                        "vehicle_capacity", torch.ones_like(demand_linehaul[..., :1])
-                    ),
-                    "capacity_original": td.get(
-                        "capacity_original", torch.ones_like(demand_linehaul[..., :1])
-                    ),
-                    "current_node": torch.zeros(
-                        (*batch_size,), dtype=torch.long, device=device
-                    ),
-                    "current_route_length": torch.zeros(
-                        (*batch_size, 1), dtype=torch.float32, device=device
-                    ),
-                    "current_time": torch.zeros(
-                        (*batch_size, 1), dtype=torch.float32, device=device
-                    ),
-                    "used_capacity_backhaul": torch.zeros(
-                        (*batch_size, 1), device=device
-                    ),
-                    "used_capacity_linehaul": torch.zeros(
-                        (*batch_size, 1), device=device
-                    ),
-                    "visited": torch.zeros(
-                        (*batch_size, td["locs"].shape[-2]),
-                        dtype=torch.bool,
-                        device=device,
-                    ),
-                },
+                reset_fields,
                 batch_size=batch_size,
                 device=device,
             )
