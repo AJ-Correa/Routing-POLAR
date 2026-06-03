@@ -28,12 +28,11 @@ import wandb
 import gc
 import torch.nn.functional as F
 
-from utils.utils import *
 from utils.functions import *
 from models.model import VRPModel
 from envs.mtvrp import MTVRPEnv, get_dataloader
 from envs.transformer import StateAugmentation
-from utils.search import Search
+from search import Search, POLAR_SCALER
 from tester import VRPTester
 
 
@@ -819,6 +818,7 @@ def _run_instance_search(batch_idx, instance_args, pomo_indices, tours, nb_granu
         time_windows,
         service_time,
         nb_granular=nb_granular,
+        scaler=POLAR_SCALER,
     )
     improvements = []
     for pomo_idx, tour in zip(pomo_indices, tours):

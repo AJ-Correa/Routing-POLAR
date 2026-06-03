@@ -31,6 +31,19 @@ def default_vrplib_round_func(dataset: str) -> str:
     return VRPLIB_ROUND_FUNC_BY_FAMILY.get(family, "round")
 
 
+def vrplib_ils_time_limit(num_nodes: int, num_seconds: Optional[float] = None) -> float:
+    """
+    Wall-clock budget (seconds) for CVRPLIB ILS when ``stop_condition='time'``.
+
+    If *num_seconds* is ``None``, uses ``240 * num_customers / 100`` with
+    ``num_customers = num_nodes - 1`` (single-depot CVRP).
+    """
+    if num_seconds is not None:
+        return float(num_seconds)
+    num_customers = max(0, int(num_nodes) - 1)
+    return 240.0 * num_customers / 100.0
+
+
 def resolve_round_func(
     round_func: Union[str, Callable[[np.ndarray], np.ndarray]],
 ) -> Callable[[np.ndarray], np.ndarray]:

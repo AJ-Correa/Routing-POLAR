@@ -29,14 +29,14 @@ from rich.progress import (
 )
 from rich.console import Console
 
-from utils.utils import TimeEstimator
+from utils.functions import TimeEstimator
 from utils.functions import (
     batchify,
     gather_by_index,
     load_npz_to_tensordict,
     clip_grad_norms,
 )
-from utils.search import Search
+from search import Search, POLAR_SCALER
 from models.model import VRPModel
 from envs.transformer import StateAugmentation
 from tester import VRPTester, metric2str
@@ -941,6 +941,7 @@ def _run_instance_search(batch_idx, instance_args, pomo_indices, tours, nb_granu
         num_depots,
         mixed_backhaul,
         nb_granular=nb_granular,
+        scaler=POLAR_SCALER,
     )
     improvements = []
     for pomo_idx, tour in zip(pomo_indices, tours):

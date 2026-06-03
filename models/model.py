@@ -8,8 +8,8 @@ import os
 import numpy as np
 import concurrent.futures
 import multiprocessing as mp
-from utils.search import _ls_instance_iterated
-from utils.vrplib_helpers import vrplib_round_func_from_id
+from search import _ls_instance_iterated
+from search.vrplib_helpers import vrplib_round_func_from_id
 
 from utils.functions import batchify, gather_by_index
 
@@ -440,14 +440,14 @@ class VRPModel(nn.Module):
         self,
         td_orig,
         env,
-        ls_nb_granular: int = 20,
-        num_iters: int = 5,
+        ls_nb_granular: int = 40,
+        num_iters: int = 5000,
         stop_condition: str = "iterations",
         num_seconds: float | None = None,
-        dmax: int = 10,
-        dmin: int = 5,
-        acceptance_rate: float = 0.01,
-        no_improvement: int = 8,
+        dmax: int = 30,
+        dmin: int = 15,
+        gamma: int = 30,
+        eta_min: float = 0.01,
     ):
         args = self.args
         batch_size = td_orig.batch_size[0]
@@ -657,8 +657,8 @@ class VRPModel(nn.Module):
                         time_limit=ils_time_limit,
                         dmax=dmax,
                         dmin=dmin,
-                        acceptance_rate=acceptance_rate,
-                        no_improvement=no_improvement,
+                        gamma=gamma,
+                        eta_min=eta_min,
                         vrplib_options=vrplib_opts,
                         mixed_backhaul=bool(mixed_backhaul_flags[i]),
                     )

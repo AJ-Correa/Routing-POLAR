@@ -13,6 +13,6 @@ __pycache__/
 scripts/
 
 # Cython extension: track sources only, not build artifacts
-utils/cython_heuristics/**
-!utils/cython_heuristics/heuristics.pyx
-!utils/cython_heuristics/setup.py
+search/cython_heuristics/**
+!search/cython_heuristics/heuristics.pyx
+!search/cython_heuristics/setup.py

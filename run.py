@@ -13,7 +13,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from trainer import VRPTrainer as Trainer
 from tuner import VRPTuner as Tuner
-from utils.utils import copy_all_src
+from utils.functions import copy_all_src
 
 
 def setup_cuda_optimizations():

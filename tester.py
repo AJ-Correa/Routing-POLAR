@@ -29,8 +29,13 @@ from utils.functions import (
     load_npz_to_tensordict,
     batchify,
 )
-from utils.search import Search
-from utils.vrplib_helpers import VRPLIB_ROUND_FUNC_IDS, default_vrplib_round_func
+from utils.metrics import gap_percent_mean_torch, gap_percent_scalar
+from search import Search
+from search.vrplib_helpers import (
+    VRPLIB_ROUND_FUNC_IDS,
+    default_vrplib_round_func,
+    vrplib_ils_time_limit,
+)
 
 
 def normalize_coord(coord: torch.Tensor) -> Tuple[torch.Tensor, float]:
@@ -145,20 +150,16 @@ class VRPTester:
                             reward = self.model.iterative_refinement(
                                 td_aug,
                                 self.env,
-                                ls_nb_granular=args.tester_params.get("ls_nb_granular", 20),
-                                num_iters=args.tester_params.get("num_iters", 75),
+                                ls_nb_granular=args.tester_params.get("ls_nb_granular", 40),
+                                num_iters=args.tester_params.get("num_iters", 5000),
                                 stop_condition=args.tester_params.get(
                                     "stop_condition", "iterations"
                                 ),
                                 num_seconds=args.tester_params.get("num_seconds", 100.0),
-                                dmax=args.tester_params.get("dmax", 10),
-                                dmin=args.tester_params.get("dmin", 5),
-                                acceptance_rate=args.tester_params.get(
-                                    "acceptance_rate", 0.01
-                                ),
-                                no_improvement=args.tester_params.get(
-                                    "no_improvement", 8
-                                ),
+                                dmax=args.tester_params.get("dmax", 30),
+                                dmin=args.tester_params.get("dmin", 15),
+                                gamma=args.tester_params.get("gamma", 30),
+                                eta_min=args.tester_params.get("eta_min", 0.01),
                             )
                         else:
                             out = self.model(td_aug, self.env)
@@ -180,8 +181,8 @@ class VRPTester:
 
                     # Compute gap using stored opt_cost
                     opt_score = opt_cost.to("cuda")
-                    gap = ((score - opt_score) * 100 / opt_score).mean().item()
-                    aug_gap = ((aug_score - opt_score) * 100 / opt_score).mean().item()
+                    gap = gap_percent_mean_torch(score.abs(), opt_score.abs())
+                    aug_gap = gap_percent_mean_torch(aug_score.abs(), opt_score.abs())
                     metric_list = [
                         score.mean().item(),
                         gap,
@@ -406,23 +407,19 @@ class VRPTester:
                                     batch_td,
                                     self.env,
                                     ls_nb_granular=args.tester_params.get(
-                                        "ls_nb_granular", 20
+                                        "ls_nb_granular", 40
                                     ),
-                                    num_iters=args.tester_params.get("num_iters", 75),
+                                    num_iters=args.tester_params.get("num_iters", 5000),
                                     stop_condition=args.tester_params.get(
                                         "stop_condition", "iterations"
                                     ),
                                     num_seconds=args.tester_params.get(
                                         "num_seconds", 100.0
                                     ),
-                                    dmax=args.tester_params.get("dmax", 10),
-                                    dmin=args.tester_params.get("dmin", 5),
-                                    acceptance_rate=args.tester_params.get(
-                                        "acceptance_rate", 0.01
-                                    ),
-                                    no_improvement=args.tester_params.get(
-                                        "no_improvement", 8
-                                    ),
+                                    dmax=args.tester_params.get("dmax", 30),
+                                    dmin=args.tester_params.get("dmin", 15),
+                                    gamma=args.tester_params.get("gamma", 30),
+                                    eta_min=args.tester_params.get("eta_min", 0.01),
                                 )
                             else:
                                 out = self.model(batch_td, self.env)
@@ -442,10 +439,8 @@ class VRPTester:
                         if batch_opt is not None:
                             b_score_abs = batch_score.abs()
                             b_aug_abs = batch_aug_score.abs()
-                            batch_gap = ((b_score_abs - batch_opt) * 100 / batch_opt).mean().item()
-                            batch_aug_gap = (
-                                ((b_aug_abs - batch_opt) * 100 / batch_opt).mean().item()
-                            )
+                            batch_gap = gap_percent_mean_torch(b_score_abs, batch_opt)
+                            batch_aug_gap = gap_percent_mean_torch(b_aug_abs, batch_opt)
                             batch_metric = [
                                 b_score_abs.mean().item(),
                                 batch_gap,
@@ -477,10 +472,8 @@ class VRPTester:
                         scores = scores.abs()
                         aug_scores = aug_scores.abs()
 
-                        gap = ((scores - opt_costs) * 100 / opt_costs).mean().item()
-                        aug_gap = (
-                            ((aug_scores - opt_costs) * 100 / opt_costs).mean().item()
-                        )
+                        gap = gap_percent_mean_torch(scores, opt_costs)
+                        aug_gap = gap_percent_mean_torch(aug_scores, opt_costs)
                     else:
                         gap = aug_gap = 0.0
 
@@ -682,8 +675,9 @@ class VRPTester:
         args = self.args
         self.model.eval()
 
-        all_test_dataset = ["A", "B", "F", "P", "X"]
-        size_limit = 200
+        # all_test_dataset = ["A", "B", "F", "P", "X"]
+        all_test_dataset = ["X"]
+        size_limit = 500
 
         all_dataset_dict = {
             "A": [],
@@ -791,21 +785,23 @@ class VRPTester:
                         torch.distributed.barrier()
 
                     if args.tester_params.get("use_refinement", False):
+                        num_nodes = len(problem["node_coord"])
+                        lib_num_seconds = vrplib_ils_time_limit(
+                            num_nodes, args.tester_params.get("num_seconds")
+                        )
                         reward = self.model.iterative_refinement(
                             td,
                             self.env,
-                            ls_nb_granular=args.tester_params.get("ls_nb_granular", 20),
-                            num_iters=args.tester_params.get("num_iters", 75),
+                            ls_nb_granular=args.tester_params.get("ls_nb_granular", 40),
+                            num_iters=args.tester_params.get("num_iters", 5000),
                             stop_condition=args.tester_params.get(
                                 "stop_condition", "iterations"
                             ),
-                            num_seconds=args.tester_params.get("num_seconds", 100.0),
-                            dmax=args.tester_params.get("dmax", 10),
-                            dmin=args.tester_params.get("dmin", 5),
-                            acceptance_rate=args.tester_params.get(
-                                "acceptance_rate", 0.01
-                            ),
-                            no_improvement=args.tester_params.get("no_improvement", 8),
+                            num_seconds=lib_num_seconds,
+                            dmax=args.tester_params.get("dmax", 30),
+                            dmin=args.tester_params.get("dmin", 15),
+                            gamma=args.tester_params.get("gamma", 30),
+                            eta_min=args.tester_params.get("eta_min", 0.01),
                         )
                     else:
                         out = self.model(td, self.env)
@@ -827,8 +823,8 @@ class VRPTester:
                     score, aug_score = ceil(score), ceil(aug_score)
                 else:
                     score, aug_score = ceil(score * scale), ceil(aug_score * scale)
-                gap = (score - opt) / opt * 100
-                aug_gap = (aug_score - opt) / opt * 100
+                gap = gap_percent_scalar(score, opt)
+                aug_gap = gap_percent_scalar(aug_score, opt)
 
                 args.log(
                     f"{instance_name}, aug score {aug_score:.1f}, aug gap {aug_gap:.3f}%"

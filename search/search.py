@@ -10,6 +10,8 @@ from pyvrp._pyvrp import (
     Solution,
 )
 from pyvrp.search import (
+    NODE_OPERATORS,
+    ROUTE_OPERATORS,
     LocalSearch,
     NeighbourhoodParams,
     compute_neighbours,
@@ -22,13 +24,50 @@ from .vrplib_helpers import compute_vrplib_cost_matrix, resolve_round_func
 
 _BOOSTER_SCHEDULE = (12, 200, 3_000, 50_000, 1_000_000)
 
-from .cython_heuristics.heuristics import (
-    concentric_removal,
-    insertion_by_cost,
-    insertion_by_distance,
-    random_removal,
-    sequence_removal,
+# Internal PyVRP integer scale for normalized [0, 1] instances.
+POLAR_SCALER = 10_000_000  # training / tuning (POLAR local search)
+NAILS_SCALER = 1_000       # inference (NAILS local search)
+
+# Default NAILS local-search operator set (PyVRP minus low-impact / slow operators).
+NAILS_EXCLUDED_OPERATORS = (
+    "Exchange30",
+    "Exchange31",
+    "Exchange32",
+    "Exchange33",
+    "TripRelocate",
+    "SwapRoutes",
 )
+
+
+def build_solve_params(
+    exclude_operators: Optional[List[str]] = None,
+    *,
+    use_all_operators: bool = False,
+) -> SolveParams:
+    """
+    Build PyVRP ``SolveParams`` for NAILS local search.
+
+    By default, ``NAILS_EXCLUDED_OPERATORS`` are removed. Pass
+    ``use_all_operators=True`` for the full PyVRP operator set, or extend
+    ``exclude_operators`` with additional operator class names.
+    """
+    if use_all_operators:
+        excluded = set(exclude_operators or [])
+    else:
+        excluded = set(NAILS_EXCLUDED_OPERATORS)
+        if exclude_operators:
+            excluded.update(exclude_operators)
+
+    node_ops = [op for op in NODE_OPERATORS if op.__name__ not in excluded]
+    route_ops = [op for op in ROUTE_OPERATORS if op.__name__ not in excluded]
+    if not node_ops:
+        raise ValueError("At least one node operator must remain active.")
+    if not route_ops:
+        raise ValueError("At least one route operator must remain active.")
+    return SolveParams(node_ops=node_ops, route_ops=route_ops)
+
+
+from .perturbation import PerturbationHeuristics
 
 
 def compute_cost_matrix(
@@ -39,9 +78,26 @@ def compute_cost_matrix(
     max_distance=None,
     num_depots=1,
     mixed_backhaul=False,
+    *,
+    coords_scaled: bool = False,
 ):
-    """Vectorized cost matrix computation with backhaul -> linehaul constraint."""
-    matrix = cdist(locs, locs, metric='euclidean')
+    """
+    Euclidean distance matrix with optional VRPB backhaul masking.
+
+    ``coords_scaled=False`` (NAILS): ``cdist`` on normalized [0, 1] coords; caller
+    scales with ``round(matrix * scaler)``.
+
+    ``coords_scaled=True`` (POLAR): distances on coords already multiplied by
+    ``POLAR_SCALER`` (no extra ``* scaler``).
+    """
+    locs = np.asarray(locs, dtype=np.float64)
+    if coords_scaled:
+        sq = np.sum(locs * locs, axis=1)
+        matrix = sq[:, None] + sq[None, :] - 2.0 * locs @ locs.T
+        np.maximum(matrix, 0, out=matrix)
+        np.sqrt(matrix, out=matrix)
+    else:
+        matrix = cdist(locs, locs, metric="euclidean")
 
     if open_route:
         matrix[:, :num_depots] = 0
@@ -52,91 +108,6 @@ def compute_cost_matrix(
         matrix[np.ix_(backhaul_mask, linehaul_mask)] = 1 << 32
 
     return matrix
-
-
-class PerturbationHeuristics:
-    """AILS-II style removal and addition heuristics for solution perturbation."""
-
-    def __init__(self, data, cost_matrix, rng):
-        self.data = data
-        self.cost_matrix = np.ascontiguousarray(cost_matrix, dtype=np.float64)
-        self.rng = rng
-        self.num_depots = len(data.depots())
-
-    def random_removal(self, tour, omega):
-        """Python wrapper → C extension. Uses actual RNG."""
-        tour_arr = np.asarray(tour, dtype=np.int64)
-
-        # Count customers to generate proper random permutation
-        n_customers = sum(1 for node in tour if node >= self.num_depots)
-        if n_customers <= omega:
-            return tour, []
-
-        # Generate random permutation using actual numpy RNG
-        rng_indices = self.rng.permutation(n_customers).astype(np.int64)
-
-        return random_removal(tour_arr, omega, self.num_depots, rng_indices)
-
-    def insertion_by_cost(self, partial_tour, removed_vertices):
-        """Python wrapper → C extension. Returns list like Python."""
-        tour_arr = np.asarray(partial_tour, dtype=np.int64)
-        removed_arr = np.asarray(removed_vertices, dtype=np.int64)
-        return insertion_by_cost(tour_arr, removed_arr, self.cost_matrix, self.num_depots)
-
-    def insertion_by_distance(self, partial_tour, removed_vertices):
-        """Insert removed vertices closest to their nearest neighbor in tour."""
-        tour_arr = np.asarray(partial_tour, dtype=np.int64)
-        removed_arr = np.asarray(removed_vertices, dtype=np.int64)
-        return insertion_by_distance(tour_arr, removed_arr, self.cost_matrix, self.num_depots)
-
-    def concentric_removal(self, tour, omega):
-        """Remove omega vertices closest to a randomly chosen seed vertex."""
-        tour_arr = np.asarray(tour, dtype=np.int64)
-        n_customers = int(np.sum(tour_arr >= self.num_depots))
-        if n_customers <= omega:
-            return tour, []
-
-        seed_cust_idx = int(self.rng.randint(0, n_customers))
-        new_tour, removed, status = concentric_removal(
-            tour_arr,
-            omega,
-            self.num_depots,
-            self.cost_matrix,
-            seed_cust_idx,
-        )
-        if status != 0:
-            return self.random_removal(tour, omega)
-        return new_tour, removed
-
-    def sequence_removal(self, tour, omega):
-        """Remove omega consecutive vertices from a random starting point."""
-        tour_arr = np.asarray(tour, dtype=np.int64)
-        n_customers = int(np.sum(tour_arr >= self.num_depots))
-        if n_customers <= omega:
-            return tour, []
-
-        rng_choice = int(self.rng.randint(0, 2**31 - 1))
-        new_tour, removed, status = sequence_removal(
-            tour_arr, omega, self.num_depots, rng_choice
-        )
-        if status != 0:
-            return self.random_removal(tour, omega)
-        return new_tour, removed
-
-    def perturb(self, tour, omega):
-        """Remove omega vertices then reinsert (concentric/sequence + cost/distance)."""
-        tour = list(tour)
-        if self.rng.random() < 0.5:
-            partial_tour, removed = self.concentric_removal(tour, omega)
-        else:
-            partial_tour, removed = self.sequence_removal(tour, omega)
-
-        if len(removed) == 0:
-            return tour
-
-        if self.rng.random() < 0.5:
-            return self.insertion_by_distance(partial_tour, removed)
-        return self.insertion_by_cost(partial_tour, removed)
 
 
 class Search:
@@ -152,6 +123,9 @@ class Search:
         num_depots=1,
         mixed_backhaul=False,
         nb_granular=20,
+        scaler: int = NAILS_SCALER,
+        exclude_operators: Optional[List[str]] = None,
+        use_all_operators: bool = True,
         metric: Literal["normalized", "vrplib"] = "normalized",
         round_func: Union[str, Callable[[np.ndarray], np.ndarray]] = "round",
         vehicle_capacity: Optional[int] = None,
@@ -159,10 +133,16 @@ class Search:
         vrplib_options: Optional[dict] = None,
     ):
         """
-        Construct a PyVRP local-search model.
+        Construct a PyVRP local-search model for NAILS.
+
+        Local search uses the full PyVRP operator set by default (training LS).
+        Pass ``use_all_operators=False`` for the reduced NAILS test-time set
+        (see ``NAILS_EXCLUDED_OPERATORS``), or pass ``exclude_operators`` to
+        drop more.
 
         metric="normalized" (default)
-            Coordinates in [0, 1], fractional demands, capacity 1000 — training / synthetic.
+            Coordinates in [0, 1], fractional demands. ``scaler`` sets the internal
+            PyVRP integer scale (``POLAR_SCALER`` for training/tuning, ``NAILS_SCALER`` for NAILS).
         metric="vrplib"
             Integer CVRPLIB geometry and costs (same rounding as ``pyvrp.read``).
             Pass raw ``node_coord``, integer ``demand`` (depot included), and file capacity.
@@ -181,6 +161,8 @@ class Search:
         self.num_depots = num_depots
         self.num_customers = len(locs) - self.num_depots
         self.eps = 1e-30
+        self._exclude_operators = exclude_operators
+        self._use_all_operators = use_all_operators
 
         if metric == "vrplib":
             if vehicle_capacity is None:
@@ -210,6 +192,7 @@ class Search:
                 service_times=service_times,
                 mixed_backhaul=mixed_backhaul,
                 nb_granular=nb_granular,
+                scaler=scaler,
             )
 
     def _init_normalized_problem(
@@ -223,39 +206,63 @@ class Search:
         service_times,
         mixed_backhaul,
         nb_granular,
+        scaler,
     ):
-        """Training / synthetic instances: coords in [0,1], internal scale 1000."""
-        self.scaler = 1_000
+        """Synthetic instances in [0, 1]. NAILS vs POLAR differ in cost-matrix construction."""
+        self.scaler = scaler
+        S = self.scaler
         nd = self.num_depots
         nc = self.num_customers
+        polar = scaler == POLAR_SCALER
 
-        locs_s = np.asarray(locs) * self.scaler
-        dlin_s = np.asarray(demands_linehauls) * self.scaler
-        dbac_s = np.asarray(demands_backhauls) * self.scaler
-        svc_s = np.asarray(service_times) * self.scaler
-        tw_arr = np.asarray(time_windows)
+        locs_u = np.asarray(locs, dtype=np.float64)
+        dlin_u = np.asarray(demands_linehauls, dtype=np.float64)
+        dbac_u = np.asarray(demands_backhauls, dtype=np.float64)
+        locs_s = locs_u * S
+        dlin_s = dlin_u * S
+        dbac_s = dbac_u * S
+        svc_s = np.asarray(service_times, dtype=np.float64) * S
+        tw_arr = np.asarray(time_windows, dtype=np.float64)
 
-        cost_matrix = np.ascontiguousarray(
-            compute_cost_matrix(
-                np.asarray(locs),
-                np.asarray(demands_linehauls),
-                np.asarray(demands_backhauls),
-                open_route=open_route,
-                num_depots=nd,
-                mixed_backhaul=mixed_backhaul,
-            ),
-        )
-        cost_matrix = np.round(cost_matrix * self.scaler)
+        if polar:
+            cost_matrix = np.ascontiguousarray(
+                compute_cost_matrix(
+                    locs_s,
+                    dlin_s,
+                    dbac_s,
+                    open_route=open_route,
+                    num_depots=nd,
+                    mixed_backhaul=mixed_backhaul,
+                    coords_scaled=True,
+                ),
+                dtype=np.float64,
+            )
+        else:
+            cost_matrix = np.ascontiguousarray(
+                np.round(
+                    compute_cost_matrix(
+                        locs_u,
+                        dlin_u,
+                        dbac_u,
+                        open_route=open_route,
+                        num_depots=nd,
+                        mixed_backhaul=mixed_backhaul,
+                        coords_scaled=False,
+                    )
+                    * S
+                ),
+                dtype=np.float64,
+            )
 
         depots, clients, vehicle_types, tw_finite = self._build_nodes_and_vehicles(
             xs_i=locs_s[:, 0],
             ys_i=locs_s[:, 1],
             dlin_i=np.round(dlin_s),
             dbac_i=np.round(dbac_s),
-            svc_i=svc_s + self.eps * self.scaler,
+            svc_i=svc_s + self.eps * S,
             tw_arr=tw_arr,
             distance_limit=distance_limit,
-            capacity=int(round((1 - self.eps) * self.scaler)),
+            capacity=int(round((1 - self.eps) * S)),
         )
         self._finish_init(cost_matrix, depots, clients, vehicle_types, nb_granular)
 
@@ -391,7 +398,10 @@ class Search:
         self._cost_matrix = cost_matrix.astype(np.float64) / self.scaler
 
         self.rng = RandomNumberGenerator(seed=0)
-        self.params = SolveParams()
+        self.params = build_solve_params(
+            self._exclude_operators,
+            use_all_operators=self._use_all_operators,
+        )
         nb_params = NeighbourhoodParams(nb_granular=nb_granular)
         neighbours = compute_neighbours(self._data, nb_params)
         ls = LocalSearch(self._data, self.rng, neighbours)
@@ -576,42 +586,54 @@ class Search:
         self,
         tour,
         seed: int = 0,
-        num_iters: int = 5,
+        num_iters: int = 5000,
         time_limit: Optional[float] = None,
-        dmax: int = 10,
-        dmin: int = 5,
-        acceptance_rate: float = 0.01,
-        no_improvement: int = 8,
+        dmax: int = 30,
+        dmin: int = 15,
+        gamma: int = 30,
+        eta_min: float = 0.01,
     ):
-        """
-        ILS-style: iterate perturbation → LS until num_iters or time_limit is reached.
-        Always returns the best feasible solution found.
+        """AILS-II: Adaptive Iterated Local Search (Máximo, Cordeau & Nascimento 2024).
 
-        When *time_limit* is set (seconds), only the perturbation loop is timed; the
-        initial LS on the input tour is excluded. *num_iters* is ignored in that case.
+        Implements the full AILS-II diversity-control loop:
 
-        dmax/dmin schedule omega over iteration index or elapsed-time fraction.
-        acceptance_rate: accept if cost <= current_cost * (1 + acceptance_rate).
-        no_improvement: reset current tour to best after this many rejections.
+        Perturbation degree
+            Target edge-distance dβ decays from *dmax* → *dmin* over the run.
+            Actual removal count ω adapts every *gamma* iterations so that the
+            edge-Hamming distance dist(s, s_r) tracks dβ: if dist > dβ then ω--;
+            if dist < dβ then ω++.
+
+        Acceptance criterion (convergent, threshold-accepting style)
+            b̄ = f* + η · (f̄ − f*)
+            where f* = best cost ever, f̄ = running average of all LS-solution costs.
+            Accept s as next reference if f(s) ≤ b̄.
+            η decays from 1 → eta_min: at the start b̄ ≈ f̄ (relaxed); at the end
+            b̄ ≈ f* (strict).
+
+        Stopping: wall-clock *time_limit* (seconds) or *num_iters* iterations.
+        The initial LS on the input tour is excluded from the time budget.
         """
         rng = np.random.RandomState(seed)
         perturbation = PerturbationHeuristics(self._data, self._cost_matrix, rng)
-        dmax = max(1, int(dmax))
-        dmin = max(1, int(dmin))
-        if dmin > dmax:
-            dmin = dmax
-        no_improvement = max(1, int(no_improvement))
-        ratio = dmin / dmax
 
+        dmax = max(1, int(dmax))
+        dmin = max(1, min(int(dmin), dmax))
+        gamma = max(1, int(gamma))
+        eta_min = float(np.clip(eta_min, 1e-9, 1.0))
+        n_customers = max(1, self.num_customers)
+
+        # ── Initial LS ────────────────────────────────────────────────
         sol = self._tour_to_solution(tour)
-        search = self._make_search(seed)
-        base_cost, base_tour = self.run(sol, search_instance=search)
+        search_inst = self._make_search(seed)
+        base_cost, ref_tour = self.run(sol, search_instance=search_inst)
 
         best_cost = base_cost
-        best_tour = base_tour
-        current_cost = base_cost
-        current_tour = base_tour
-        no_improvement_count = 0
+        best_tour = ref_tour
+        f_bar = float(base_cost)   # running average of ALL LS-solution costs
+        n_sols = 1
+
+        omega = float(dmax)        # actual perturbation count (continuous for smooth ±1 steps)
+        gamma_diffs: list = []     # accumulated (dist − dβ) over last gamma iterations
 
         timed = time_limit is not None and time_limit > 0.0
         ils_start = time.perf_counter()
@@ -619,42 +641,62 @@ class Search:
         it = 0
 
         while True:
+            # ── Stopping & progress ───────────────────────────────────
             if timed:
                 now = time.perf_counter()
                 if now >= ils_deadline:
                     break
-                progress = min(1.0, (now - ils_start) / time_limit)
+                # Clamp away from exactly 1 so eta/d_beta never fully collapse
+                progress = min(1.0 - 1e-9, (now - ils_start) / time_limit)
             else:
                 if it >= num_iters:
                     break
-                progress = it / max(1, num_iters - 1)
+                progress = it / max(1, num_iters - 1) if num_iters > 1 else 0.0
 
-            current_omega = max(dmin, int(round(dmax * (ratio**progress))))
+            # ── Adaptive parameters ───────────────────────────────────
+            # dβ: target edge-distance between ref and post-LS solution
+            d_beta = dmax * ((dmin / dmax) ** progress)
+            # η: acceptance relaxation, 1 (relaxed) → eta_min (strict)
+            eta = eta_min ** progress
+            # Acceptance threshold: b̄ = f* + η·(f̄ − f*)
+            b_bar = best_cost + eta * (f_bar - best_cost)
 
-            perturbed = perturbation.perturb(current_tour, omega=current_omega)
+            # ── Perturbation ──────────────────────────────────────────
+            omega_int = max(1, min(int(round(omega)), n_customers - 1))
+            perturbed = perturbation.perturb(ref_tour, omega=omega_int)
 
             try:
                 sol = self._tour_to_solution(perturbed)
-                cost, improved_tour = self.run(sol, search_instance=search)
+                cost, ls_tour = self.run(sol, search_instance=search_inst)
 
+                # Edge-Hamming distance between LS result and reference
+                dist = Search._edge_hamming(ls_tour, ref_tour)
+                gamma_diffs.append(dist - d_beta)
+
+                # Running average of all generated LS costs
+                n_sols += 1
+                f_bar += (cost - f_bar) / n_sols
+
+                # Track global best
                 if cost < best_cost:
                     best_cost = cost
-                    best_tour = improved_tour
+                    best_tour = ls_tour
 
-                accept_limit = current_cost * (1.0 + acceptance_rate)
-                if cost <= accept_limit:
-                    current_cost = cost
-                    current_tour = improved_tour
-                    no_improvement_count = 0
-                else:
-                    no_improvement_count += 1
-                    if no_improvement_count >= no_improvement:
-                        current_cost = best_cost
-                        current_tour = best_tour
-                        no_improvement_count = 0
+                # Acceptance criterion
+                if cost <= b_bar:
+                    ref_tour = ls_tour
+
+                # Adjust ω every gamma iterations based on average distance deviation
+                if len(gamma_diffs) >= gamma:
+                    avg_diff = sum(gamma_diffs) / len(gamma_diffs)
+                    if avg_diff > 0:           # distances too large → less perturbation
+                        omega = max(1.0, omega - 1.0)
+                    elif avg_diff < 0:         # distances too small → more perturbation
+                        omega = min(float(n_customers - 1), omega + 1.0)
+                    gamma_diffs.clear()
 
             except Exception:
-                no_improvement_count += 1
+                pass
 
             it += 1
 
@@ -666,17 +708,17 @@ def _ls_instance_iterated(
     tour,
     nb_granular,
     seed,
-    num_iters=5,
+    num_iters=5000,
     time_limit=None,
-    dmax=10,
-    dmin=5,
-    acceptance_rate=0.01,
-    no_improvement=8,
+    dmax=30,
+    dmin=15,
+    gamma=30,
+    eta_min=0.01,
     vrplib_options: Optional[dict] = None,
     mixed_backhaul: bool = False,
 ):
     """
-    Iterated perturbation + LS on one instance.
+    AILS-II perturbation + LS on one instance.
     Returns (cost, improved_tour) where improved_tour is guaranteed feasible.
 
     When *vrplib_options* is set, LS uses CVRPLIB integer costs (see Search metric='vrplib').
@@ -702,6 +744,8 @@ def _ls_instance_iterated(
         num_depots=num_depots,
         mixed_backhaul=mixed_backhaul,
         nb_granular=nb_granular,
+        use_all_operators=False,
+        scaler=NAILS_SCALER,
         vrplib_options=vrplib_options,
     )
     cost, improved_tour = search.iterated_perturbation_search(
@@ -711,8 +755,8 @@ def _ls_instance_iterated(
         time_limit=time_limit,
         dmax=dmax,
         dmin=dmin,
-        acceptance_rate=acceptance_rate,
-        no_improvement=no_improvement,
+        gamma=gamma,
+        eta_min=eta_min,
     )
     return cost, improved_tour
 
