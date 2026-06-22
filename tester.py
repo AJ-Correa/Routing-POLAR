@@ -164,7 +164,7 @@ class VRPTester:
                         else:
                             out = self.model(td_aug, self.env)
                             reward = out["reward"]
-                            del out, batch_td
+                            del out
 
                         all_reward = reward.view(
                             -1, self.augmentation.num_augment, batch_size
@@ -806,7 +806,7 @@ class VRPTester:
                     else:
                         out = self.model(td, self.env)
                         reward = out["reward"]
-                        del out, batch_td
+                        del out
 
                 use_time = time.time() - start_time
 

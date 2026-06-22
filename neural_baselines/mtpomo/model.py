@@ -3,6 +3,8 @@ import torch.nn as nn
 
 from utils.functions import batchify, gather_by_index
 
+from models.layers import PromptNet
+
 from .decoder import VRP_Decoder
 from .encoder import VRP_Encoder
 from .encoder_ple import VRP_Encoder as VRP_Encoder_PLE
@@ -16,8 +18,10 @@ class VRPModel(nn.Module):
         self.loss_mode = "rl"
         if self.args.model_params.get("use_ple", False):
             self.encoder = VRP_Encoder_PLE(**args.model_params)
+            self.prompt_net = PromptNet(args)
         else:
             self.encoder = VRP_Encoder(**args.model_params)
+            self.prompt_net = None
         self.decoder = VRP_Decoder(**args.model_params)
         self.encoded_nodes = None
         self.encoded_coords = None
@@ -48,9 +52,15 @@ class VRPModel(nn.Module):
     def set_loss_mode(self, mode: str):
         self.loss_mode = mode
 
+    def _encode(self, td):
+        if self.prompt_net is not None:
+            prompt = self.prompt_net(td)["prompt"]
+            return self.encoder(td, prompt)
+        return self.encoder(td)
+
     def forward(self, td, env, reld_alpha=1.0, with_greedy=False):
         args = self.args
-        node_embed, node_coords = self.encoder(td)
+        node_embed, node_coords = self._encode(td)
         self.encoded_nodes = node_embed
         self.encoded_coords = node_coords
 
@@ -164,7 +174,7 @@ class VRPModel(nn.Module):
             raise ValueError("tour_lengths must be 1D with same batch as tours")
 
         if node_embed is None or node_coords is None:
-            node_embed, node_coords = self.encoder(td)
+            node_embed, node_coords = self._encode(td)
 
         td = batchify(td, num_starts)
 

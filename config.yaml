@@ -32,11 +32,11 @@ tester_params:
   use_refinement: true         # Use AILS-II refinement
   ls_nb_granular: 30           # LS neighbourhood granularity (varphi in AILS-II; default 40)
   stop_condition: 'iterations' # 'iterations' or 'time' (ILS stopping criterion)
-  num_iters: 10                # Max iterations (when stop_condition=iterations)
+  num_iters: 1000              # Max iterations (when stop_condition=iterations)
   num_seconds: null            # Wall-clock budget incl. neural decode (time mode); null in test_lib / Set-X ablation => 240*(n-1)/100
-  dmax: 15                     # Initial target edge-distance between ref and post-LS solution (AILS-II default: 30)
-  dmin: 10                     # Final target edge-distance (AILS-II default: 15)
-  gamma: 10                    # Omega adjustment interval in iterations (AILS-II default: 30)
+  dmax: 10                     # Initial target edge-distance between ref and post-LS solution (AILS-II default: 30)
+  dmin: 5                      # Final target edge-distance (AILS-II default: 15)
+  gamma: 30                    # Omega adjustment interval in iterations (AILS-II default: 30)
   eta_min: 0.01                # Minimum acceptance relaxation η (AILS-II default: 0.01)
 
 

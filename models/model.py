@@ -450,7 +450,13 @@ class VRPModel(nn.Module):
         eta_min: float = 0.01,
     ):
         args = self.args
-        batch_size = td_orig.batch_size[0]
+        input_batch_size = td_orig.batch_size[0]
+        num_augment = int(args.tester_params.get("num_augment", 1))
+        if num_augment > 1 and input_batch_size % num_augment == 0:
+            batch_size = input_batch_size // num_augment
+            td_orig = td_orig[:batch_size]
+        else:
+            batch_size = input_batch_size
         device = td_orig.device
         po_B = args.trainer_params.get("po_B", None)
         neural_start = time.perf_counter()

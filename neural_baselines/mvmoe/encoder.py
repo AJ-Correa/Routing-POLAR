@@ -91,9 +91,10 @@ class VRP_Encoder(nn.Module):
         return out, td["locs"]
 
     def forward(self, td):
-        moe_loss = 0
+        losses = []
         out, coords = self._embed(td)
         for layer in self.layers:
             out, loss = layer(out)
-            moe_loss = moe_loss + loss
-        return out, coords, moe_loss
+            if isinstance(loss, torch.Tensor):
+                losses.append(loss)
+        return out, coords, sum(losses) if losses else 0

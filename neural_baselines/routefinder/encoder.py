@@ -17,7 +17,7 @@ class EncoderLayer(nn.Module):
         self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
         self.add_n_normalization_1 = AddAndNorm(**model_params)
         self.add_n_normalization_2 = AddAndNorm(**model_params)
-        self.feed_forward = ParallelGatedMLP()
+        self.feed_forward = ParallelGatedMLP(hidden_size=embedding_dim)
 
     def forward(self, input1):
         normed = self.add_n_normalization_1(None, input1)
