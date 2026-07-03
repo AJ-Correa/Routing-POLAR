@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import gc
+import re
 import time
 import torch
 import numpy as np
@@ -36,6 +37,14 @@ from search.vrplib_helpers import (
     default_vrplib_round_func,
     vrplib_ils_time_limit,
 )
+
+
+def natural_sort_key(text: str) -> List:
+    """Sort key for instance names with embedded numbers (e.g. X-n101-k25)."""
+    return [
+        int(part) if part.isdigit() else part.lower()
+        for part in re.split(r"(\d+)", text)
+    ]
 
 
 def normalize_coord(coord: torch.Tensor) -> Tuple[torch.Tensor, float]:
@@ -677,7 +686,7 @@ class VRPTester:
 
         # all_test_dataset = ["A", "B", "F", "P", "X"]
         all_test_dataset = ["X"]
-        size_limit = 500
+        size_limit = 1001
 
         all_dataset_dict = {
             "A": [],
@@ -698,7 +707,20 @@ class VRPTester:
             if not os.path.exists(dataset_dir):
                 continue
 
-            path_list = [os.path.join(dataset_dir, x) for x in os.listdir(dataset_dir)]
+            path_list = [
+                os.path.join(dataset_dir, x)
+                for x in os.listdir(dataset_dir)
+                if not (
+                    os.path.isdir(os.path.join(dataset_dir, x))
+                    or x.endswith(".sol")
+                    or x.startswith(".")
+                )
+            ]
+            path_list.sort(
+                key=lambda p: natural_sort_key(
+                    os.path.splitext(os.path.basename(p))[0]
+                )
+            )
 
             all_gap, all_aug_gap, all_aug_score = [], [], []
             gap_dict, aug_gap_dict, aug_score_dict = {}, {}, {}
@@ -817,11 +839,14 @@ class VRPTester:
                 score = -all_reward[0, :].float().item()
                 aug_reward, _ = all_reward.max(dim=0)
                 aug_score = -aug_reward.float().item()
-
-                if "vrplib_coords" in td_reset.keys():
-                    # LS / refinement costs are already CVRPLIB integers.
+                
+                use_refinement = args.tester_params.get("use_refinement", False)
+                if use_refinement and "vrplib_coords" in td_reset.keys():
+                    # NAILS refinement reports costs in CVRPLIB integer units.
                     score, aug_score = ceil(score), ceil(aug_score)
                 else:
+                    # Neural decode uses normalized coordinates; rescale to
+                    # original coordinate units before comparing to BKS.
                     score, aug_score = ceil(score * scale), ceil(aug_score * scale)
                 gap = gap_percent_scalar(score, opt)
                 aug_gap = gap_percent_scalar(aug_score, opt)
