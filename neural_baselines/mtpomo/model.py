@@ -154,7 +154,6 @@ class VRPModel(nn.Module):
             "reward": td["reward"],
             "log_likelihood": logprobs,
             "tours": tours,
-            "ccl_active_steps": [],
         }
 
     def route_forward(

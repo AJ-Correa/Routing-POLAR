@@ -3,7 +3,6 @@ import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import random
 import os
 import numpy as np
 import concurrent.futures
@@ -157,22 +156,11 @@ class VRPModel(nn.Module):
         # Autoregressive decoding loop
         step = 0
         while not td["done"].all():
-            if self.decoder.use_ccl:
-                prob = (
-                    self.decoder.ccl_prob_train
-                    if self.training
-                    else self.decoder.ccl_prob_test
-                )
-                use_ccl_this_step = random.random() < prob
-            else:
-                use_ccl_this_step = None
-
             logprobs, mask, cache = self.decoder(
                 td,
                 cache,
                 num_starts,
                 reld_alpha=reld_alpha,
-                ccl_active=use_ccl_this_step,
             )
 
             if self.training:
@@ -290,151 +278,6 @@ class VRPModel(nn.Module):
 
         return {"reward": reward, "log_likelihood": logprobs, "tours": tours_out}
 
-    def route_forward_ccl(
-        self,
-        td,
-        env,
-        ls_tours,
-        ls_tour_lengths,
-        node_embed=None,
-        node_coords=None,
-        reld_alpha=1.0,
-    ):
-        """Compute log-likelihoods for LS-improved tours alongside N sampled solutions.
-
-        Samples N solutions using POMO to build robust context in TSNR, while
-        teacher-forcing the LS-improved tour at start 0. ONLY returns the
-        reward and log-likelihood for the LS-improved tour.
-        """
-        if ls_tours.dim() != 2:
-            raise ValueError("ls_tours must be 2D: [batch, steps]")
-
-        args = self.args
-        batch_size = td.batch_size[0]
-
-        # Encode if embeddings not supplied
-        if node_embed is None or node_coords is None:
-            p_out = self.prompt_net(td)
-            prompt = p_out["prompt"]
-            node_embed, node_coords = self.encoder(td, prompt)
-
-        # Select POMO starts (same logic as forward)
-        po_B = args.trainer_params.get("po_B", None)
-        num_starts, start_actions, _ = env.select_start_nodes(
-            td, po_B=po_B, with_greedy=True
-        )
-        start_actions = start_actions.to(td.device)
-
-        # Expand batch for multi-start decoding
-        td = batchify(td, num_starts)
-
-        # Track global step index
-        step = 0
-        start_actions[:batch_size] = ls_tours[:, step]
-
-        # First step: depot/customer selection
-        logprobs_list = [
-            torch.zeros_like(start_actions, dtype=torch.float32, device=td.device)
-        ]
-        actions_list = [start_actions]
-        td.set("action", start_actions)
-        td = env.step(td)["next"]
-        step += 1
-
-        # Multi-depot second start
-        pomo_customer_starts = (
-            env.get_pomo_customer_starts()
-            if hasattr(env, "get_pomo_customer_starts")
-            else None
-        )
-        if pomo_customer_starts is not None:
-            pomo_customer_starts = pomo_customer_starts.to(td.device)
-            # Override start 0 with the LS tour's second action (customer start)
-            pomo_customer_starts[:batch_size] = ls_tours[:, step]
-            logprobs_list.append(
-                torch.zeros_like(
-                    pomo_customer_starts, dtype=torch.float32, device=td.device
-                )
-            )
-            actions_list.append(pomo_customer_starts)
-            td.set("action", pomo_customer_starts)
-            td = env.step(td)["next"]
-            step += 1
-
-        # Prepare decoder cache
-        decoder_k = reshape_by_heads(
-            self.decoder.Wk(node_embed), head_num=args.model_params["head_num"]
-        )
-        decoder_v = reshape_by_heads(
-            self.decoder.Wv(node_embed), head_num=args.model_params["head_num"]
-        )
-        decoder_single_head_k = node_embed.transpose(1, 2)
-
-        cache = PrecomputedCache(
-            node_embed,
-            decoder_k,
-            decoder_v,
-            decoder_single_head_k,
-            node_coords,
-        )
-
-        # Autoregressive decoding
-        while not td["done"].all():
-            if self.decoder.use_ccl:
-                prob = (
-                    self.decoder.ccl_prob_train
-                    if self.training
-                    else self.decoder.ccl_prob_test
-                )
-                use_ccl_this_step = random.random() < prob
-            else:
-                use_ccl_this_step = None
-
-            logprobs, mask, cache = self.decoder(
-                td,
-                cache,
-                num_starts,
-                reld_alpha=reld_alpha,
-                ccl_active=use_ccl_this_step,
-            )
-
-            # Sample all starts
-            select = VRPModel.sampling(logprobs, self.args.log, mask)
-
-            # Teacher-force start 0 (LS tour)
-            within_tour = step < ls_tour_lengths
-            if within_tour.any():
-                ls_actions = ls_tours[:, step]
-                select[:batch_size] = torch.where(
-                    within_tour, ls_actions, select[:batch_size]
-                )
-
-            logprobs = gather_by_index(logprobs, select, dim=1)
-            td.set("action", select)
-            actions_list.append(select)
-            logprobs_list.append(logprobs)
-            td = env.step(td)["next"]
-            step += 1
-
-        logprobs = torch.stack(logprobs_list, 1)
-        actions = torch.stack(actions_list, 1)
-        reward, tours = env.get_reward(td, actions)
-
-        assert (logprobs > -1000).data.all(), (
-            "Logprobs should not be -inf, check sampling procedure!"
-        )
-
-        # We successfully sampled N solutions for context and evaluated the LS tour.
-        # Now, extract AND RETURN ONLY the LS-improved tour results (the first batch_size elements)
-        ls_reward = reward[:batch_size]
-        ls_logprobs = logprobs[:batch_size]
-
-        return {
-            "reward": ls_reward,
-            "log_likelihood": ls_logprobs,
-            "tours": ls_tours,
-        }
-
     @torch.inference_mode()
     def iterative_refinement(
         self,
@@ -546,16 +389,10 @@ class VRPModel(nn.Module):
 
         # Autoregressive decode
         while not td_dec["done"].all():
-            use_ccl_step = (
-                random.random() < self.decoder.ccl_prob_test
-                if self.decoder.use_ccl
-                else None
-            )
             logprobs, mask, cache = self.decoder(
                 td_dec,
                 cache,
                 num_starts,
-                ccl_active=use_ccl_step,
             )
             select = VRPModel.greedy(logprobs, mask)
             actions_list.append(select)

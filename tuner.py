@@ -42,6 +42,9 @@ from envs.transformer import StateAugmentation
 from tester import VRPTester, metric2str
 
 
+TRAIN_METRIC_LABELS = ("loss", "cost")
+
+
 def clear_gpu():
     """Clear GPU memory."""
     gc.collect()
@@ -180,15 +183,11 @@ class VRPTuner:
         opt_params = args.tuner_optimizer_params
         lr = float(opt_params["optimizer"].get("lr", 1e-4))
         weight_decay = float(opt_params["optimizer"].get("weight_decay", 1e-6))
-        betas = (
-            float(opt_params["optimizer"].get("beta1", 0.9)),
-            float(opt_params["optimizer"].get("beta2", 0.999)),
-        )
         milestones = opt_params["scheduler"].get("milestones", [8])
         gamma = opt_params["scheduler"].get("gamma", 0.1)
 
         self.optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=lr, weight_decay=weight_decay, betas=betas
+            self.model.parameters(), lr=lr, weight_decay=weight_decay
         )
 
         # LR scheduler
@@ -561,28 +560,15 @@ class VRPTuner:
         node_embed_flat = node_embed_unique[local_instance_idx]
         node_coords_flat = node_coords_unique[local_instance_idx]
 
-        use_ccl = getattr(self.model, "decoder", None) and getattr(
-            self.model.decoder, "use_ccl", False
+        ls_out = self.model.route_forward(
+            td_flat,
+            self.env,
+            tours_tensor,
+            tour_lengths,
+            num_starts=1,
+            node_embed=node_embed_flat,
+            node_coords=node_coords_flat,
         )
-        if use_ccl:
-            ls_out = self.model.route_forward_ccl(
-                td_flat,
-                self.env,
-                tours_tensor,
-                tour_lengths,
-                node_embed=node_embed_flat,
-                node_coords=node_coords_flat,
-            )
-        else:
-            ls_out = self.model.route_forward(
-                td_flat,
-                self.env,
-                tours_tensor,
-                tour_lengths,
-                num_starts=1,
-                node_embed=node_embed_flat,
-                node_coords=node_coords_flat,
-            )
 
         ls_rewards = ls_out["reward"]  # (num_flat,)
         ls_log_ll = ls_out["log_likelihood"].sum(1)  # (num_flat,)
@@ -788,8 +774,8 @@ class VRPTuner:
                         # Log
                         metric_info = "|".join(
                             [
-                                f"{args.metric_label[i]} {metric_list[i]:.4f}"
-                                for i in range(len(args.metric_label))
+                                f"{TRAIN_METRIC_LABELS[i]} {metric_list[i]:.4f}"
+                                for i in range(len(TRAIN_METRIC_LABELS))
                             ]
                         )
                         ls_info = f"|LS:{ls_update_count}" if use_ls else ""
@@ -807,8 +793,8 @@ class VRPTuner:
                 metric_list = metric_tensor.tolist()
                 metric_info = "|".join(
                     [
-                        f"{args.metric_label[i]} {metric_list[i]:.4f}"
-                        for i in range(len(args.metric_label))
+                        f"{TRAIN_METRIC_LABELS[i]} {metric_list[i]:.4f}"
+                        for i in range(len(TRAIN_METRIC_LABELS))
                     ]
                 )
                 elapsed = time.strftime(

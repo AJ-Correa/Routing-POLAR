@@ -36,6 +36,9 @@ from search import Search, POLAR_SCALER
 from tester import VRPTester
 
 
+TRAIN_METRIC_LABELS = ("loss", "cost")
+
+
 def clear_gpu():
     """Clear GPU memory by collecting garbage and emptying CUDA cache."""
     gc.collect()
@@ -133,13 +136,11 @@ class VRPTrainer:
         self.use_scaler = use_scaler
 
         opt_conf = args.optimizer_params["optimizer"]
-        betas = (float(opt_conf.get("beta1", 0.9)), float(opt_conf.get("beta2", 0.999)))
 
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=opt_conf["lr"],
             weight_decay=opt_conf.get("weight_decay", 0),
-            betas=betas,
         )
 
         # LR scheduler
@@ -386,29 +387,15 @@ class VRPTrainer:
         node_embed_flat = node_embed_unique[local_instance_idx]
         node_coords_flat = node_coords_unique[local_instance_idx]
 
-        use_ccl = getattr(self.model, "decoder", None) and getattr(
-            self.model.decoder, "use_ccl", False
+        ls_out = self.model.route_forward(
+            td_flat,
+            self.env,
+            tours_tensor,
+            tour_lengths,
+            num_starts=1,
+            node_embed=node_embed_flat,
+            node_coords=node_coords_flat,
         )
-
-        if use_ccl:
-            ls_out = self.model.route_forward_ccl(
-                td_flat,
-                self.env,
-                tours_tensor,
-                tour_lengths,
-                node_embed=node_embed_flat,
-                node_coords=node_coords_flat,
-            )
-        else:
-            ls_out = self.model.route_forward(
-                td_flat,
-                self.env,
-                tours_tensor,
-                tour_lengths,
-                num_starts=1,
-                node_embed=node_embed_flat,
-                node_coords=node_coords_flat,
-            )
 
         ls_rewards = ls_out["reward"]  # (num_flat,)
         ls_log_ll = ls_out["log_likelihood"].sum(1)  # (num_flat,)
@@ -652,8 +639,8 @@ class VRPTrainer:
                         all_metric.append(metric_list)
                         metric_info = " | ".join(
                             [
-                                f"{args.metric_label[i]} {metric_list[i]:.4f}"
-                                for i in range(len(args.metric_label))
+                                f"{TRAIN_METRIC_LABELS[i]} {metric_list[i]:.4f}"
+                                for i in range(len(TRAIN_METRIC_LABELS))
                             ]
                         )
                         ls_info = f"LS:{ls_update_count}" if use_ls else ""
@@ -683,8 +670,8 @@ class VRPTrainer:
                 metric_list = metric_tensor.tolist()
                 metric_info = " | ".join(
                     [
-                        f"{args.metric_label[i]} {metric_list[i]:.4f}"
-                        for i in range(len(args.metric_label))
+                        f"{TRAIN_METRIC_LABELS[i]} {metric_list[i]:.4f}"
+                        for i in range(len(TRAIN_METRIC_LABELS))
                     ]
                 )
                 elapsed = time.strftime(
@@ -703,8 +690,8 @@ class VRPTrainer:
                         metric_avg = metric_tensor_ / dist.get_world_size()
                         metric_info = "|".join(
                             [
-                                f"{args.metric_label[i]} {metric_avg[i]:.4f}"
-                                for i in range(len(args.metric_label))
+                                f"{TRAIN_METRIC_LABELS[i]} {metric_avg[i]:.4f}"
+                                for i in range(len(TRAIN_METRIC_LABELS))
                             ]
                         )
                         args.log(
@@ -713,8 +700,8 @@ class VRPTrainer:
                         if args.wandb != "" and args.rank == 0:
                             wandb.log(
                                 {
-                                    f"{args.metric_label[i]}_train": metric_list[i]
-                                    for i in range(len(args.metric_label))
+                                    f"{TRAIN_METRIC_LABELS[i]}_train": metric_list[i]
+                                    for i in range(len(TRAIN_METRIC_LABELS))
                                 },
                                 step=epoch,
                             )
@@ -722,8 +709,8 @@ class VRPTrainer:
                 elif args.wandb != "":
                     wandb.log(
                         {
-                            f"{args.metric_label[i]}_train": metric_list[i]
-                            for i in range(len(args.metric_label))
+                            f"{TRAIN_METRIC_LABELS[i]}_train": metric_list[i]
+                            for i in range(len(TRAIN_METRIC_LABELS))
                         },
                         step=epoch,
                     )

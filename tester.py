@@ -684,8 +684,8 @@ class VRPTester:
         args = self.args
         self.model.eval()
 
-        # all_test_dataset = ["A", "B", "F", "P", "X"]
-        all_test_dataset = ["X"]
+        all_test_dataset = ["A", "B", "F", "P", "X"]
+        # all_test_dataset = ["X"]
         size_limit = 1001
 
         all_dataset_dict = {

@@ -17,11 +17,8 @@ model_params:
   # Feature switches
   use_film: true              # FiLM (Feature-wise Linear Modulation) for task conditioning
   use_reld: true              # Rethinking Light Decode-based solvers (Huang et al., 2025)
-  use_rope: false             # RoPE-2D (2D Rotary Positional Embeddings)
-  use_ple: false              # Progressive Layer Extraction
-  use_ccl: false              # Chain-of-Context Learning (Gui et al., 2026)
-  ccl_prob_train: 0.5         # CCL probability during training
-  ccl_prob_test: 1.0          # CCL probability during testing
+  use_rope: true              # RoPE-2D (2D Rotary Positional Embeddings)
+  use_ple: true               # Progressive Layer Extraction
 
 
 # =============================================================================
@@ -29,10 +26,10 @@ model_params:
 # =============================================================================
 
 tester_params:
-  use_refinement: true         # Use AILS-II refinement
+  use_refinement: false        # Use AILS-II refinement
   ls_nb_granular: 30           # LS neighbourhood granularity (varphi in AILS-II; default 40)
   stop_condition: 'iterations' # 'iterations' or 'time' (ILS stopping criterion)
-  num_iters: 1000              # Max iterations (when stop_condition=iterations)
+  num_iters: 250              # Max iterations (when stop_condition=iterations)
   num_seconds: null            # Wall-clock budget incl. neural decode (time mode); null in test_lib / Set-X ablation => 240*(n-1)/100
   dmax: 10                     # Initial target edge-distance between ref and post-LS solution (AILS-II default: 30)
   dmin: 5                      # Final target edge-distance (AILS-II default: 15)
@@ -69,8 +66,6 @@ optimizer_params:
   optimizer:
     lr: 3e-4                     # Learning rate
     weight_decay: 1e-6           # L2 regularization
-    beta1: 0.9                   # Optimizer beta1 momentum
-    beta2: 0.999                 # Optimizer beta2 second-momentum
   scheduler:
     name: 'MultiStepLR'          # LR scheduler type ('MultiStepLR' by default, others are not implemented)
     milestones: [270, 295]       # Epochs to decay LR
@@ -111,10 +106,8 @@ tuner_params:
 
 tuner_optimizer_params:
   optimizer:
-    lr: 1e-4                  # Learning rate for fine-tuning (overridden by --lr)
+    lr: 1e-4                  # Learning rate for fine-tuning
     weight_decay: 1e-6        # L2 regularization
-    beta1: 0.9                # Optimizer beta1 momentum
-    beta2: 0.999              # Optimizer beta2 second-momentum
   scheduler:
     name: 'MultiStepLR'       # LR scheduler type ('MultiStepLR' by default, others are not implemented)
     milestones: [8]           # Epochs to decay LR
@@ -136,64 +129,3 @@ env:
   test_episodes: 1000         # Number of test instances per evaluation
   test_batch_size: 100        # Batch size for testing
   data_dir: './data'          # Directory containing datasets
-  
-  # Test configuration indices (reference lists below)
-  test_size_idx: [0]          # 0=50, 1=100, 2=200, 3=300
-  test_problem_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]  # All 16 variants
-  test_distribution_idx: [9]   # 9=uniform
-
-
-# =============================================================================
-# METRIC LABELS (for logging)
-# =============================================================================
-# Format: 'priority/prefix_description'
-# priority: 0=highest, 1=second, etc.
-
-metric_label:
-  - 'loss'     # loss
-  - 'cost'     # cost
-
-test_metric_label:
-  - '1g/0gap'      # gap to optimal
-  - '2ag/0aug_gap' # gap with augmentation
-
-
-# =============================================================================
-# TEST CONFIGURATION LISTS
-# =============================================================================
-
-all_test_size:
-  - 50
-  - 100
-  - 200
-  - 300
-
-all_test_problem:
-  - "cvrp"
-  - "ovrp"
-  - "vrpb"
-  - "vrpl"
-  - "vrptw"
-  - "ovrptw"
-  - "ovrpb"
-  - "ovrpl"
-  - "ovrpbl"
-  - "ovrpbtw"
-  - "ovrpltw"
-  - "ovrpbltw"
-  - "vrpbl"
-  - "vrpbtw"
-  - "vrpltw"
-  - "vrpbltw"
-
-all_test_distribution:
-  - "explosion"
-  - "implosion"
-  - "cluster"
-  - "rotation"
-  - "linearprojection"
-  - "axisprojection"
-  - "expansion"
-  - "compression"
-  - "grid"
-  - "uniform"

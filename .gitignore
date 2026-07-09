@@ -1,5 +1,14 @@
-# Run outputs
-result/*
+# Run outputs (ignore by default)
+result/**
+
+# Published paper checkpoints (epoch 300 only)
+!result/POLAR/
+!result/POLAR/n=50/
+!result/POLAR/n=50/2026-0515-1225/
+!result/POLAR/n=50/2026-0515-1225/checkpoint-300.pt
+!result/POLAR/n=100/
+!result/POLAR/n=100/2026-0517-1400/
+!result/POLAR/n=100/2026-0517-1400/checkpoint-300.pt
 
 # Python bytecode caches (anywhere in the repo)
 __pycache__/
@@ -8,9 +17,11 @@ __pycache__/
 
 # IDE
 .idea/
+.cursor/
 
-# Local profiling / experiment scripts (not part of the core package)
+# Local profiling / experiment scripts
 scripts/
+command.txt
 
 # Cython extension: track sources only, not build artifacts
 search/cython_heuristics/**

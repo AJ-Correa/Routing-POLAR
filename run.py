@@ -15,6 +15,25 @@ from trainer import VRPTrainer as Trainer
 from tuner import VRPTuner as Tuner
 from utils.functions import copy_all_src
 
+ALL_TEST_PROBLEMS = (
+    "cvrp",
+    "ovrp",
+    "vrpb",
+    "vrpl",
+    "vrptw",
+    "ovrptw",
+    "ovrpb",
+    "ovrpl",
+    "ovrpbl",
+    "ovrpbtw",
+    "ovrpltw",
+    "ovrpbltw",
+    "vrpbl",
+    "vrpbtw",
+    "vrpltw",
+    "vrpbltw",
+)
+
 
 def setup_cuda_optimizations():
     """Configure PyTorch/CUDA optimizations (Flash Attention, cuDNN, TF32)."""
@@ -105,12 +124,6 @@ def parse_arguments():
         "--test_only", dest="test_only", action="store_true", help="Test only"
     )
     parser.add_argument(
-        "--test_search",
-        dest="test_search",
-        action="store_true",
-        help="Apply local search to the best solution found during testing",
-    )
-    parser.add_argument(
         "--skip", dest="skip", action="store_true", help="Quick test (3 steps)"
     )
 
@@ -143,46 +156,10 @@ def load_config(args):
 
 
 def set_test_params(args):
-    """Map test indices to actual configurations and generate metric labels."""
-    args.env["test_size"] = [
-        args.all_test_size[idx] for idx in args.env["test_size_idx"]
-    ]
-    args.env["test_problem"] = [
-        args.all_test_problem[idx] for idx in args.env["test_problem_idx"]
-    ]
-    args.env["test_distribution"] = [
-        args.all_test_distribution[idx] for idx in args.env["test_distribution_idx"]
-    ]
-
-    # Generate metric labels: s/{idx}-{size}-metric, p/{idx}-{problem}-metric, d/{idx}-{dist}-metric
-    size_labels = [
-        f"s/{idx:02d}-{args.all_test_size[idx]}-a8gap%"
-        for idx in args.env["test_size_idx"]
-    ]
-    size_labels += [
-        f"s/{idx + len(args.all_test_size):02d}-{args.all_test_size[idx]}-gap%"
-        for idx in args.env["test_size_idx"]
-    ]
-
-    problem_labels = [
-        f"p/{idx:02d}-{args.all_test_problem[idx]}-a8gap%"
-        for idx in args.env["test_problem_idx"]
-    ]
-    problem_labels += [
-        f"p/{idx + len(args.all_test_problem):02d}-{args.all_test_problem[idx]}-gap%"
-        for idx in args.env["test_problem_idx"]
-    ]
-
-    distribution_labels = [
-        f"d/{idx:02d}-{args.all_test_distribution[idx]}-a8gap%"
-        for idx in args.env["test_distribution_idx"]
-    ]
-    distribution_labels += [
-        f"d/{idx + len(args.all_test_distribution):02d}-{args.all_test_distribution[idx]}-gap%"
-        for idx in args.env["test_distribution_idx"]
-    ]
-
-    args.test_metric_label = size_labels + problem_labels + distribution_labels
+    """Set fixed evaluation scope: current n_size, all 16 variants, uniform distribution."""
+    args.env["test_size"] = [args.n_size]
+    args.env["test_problem"] = list(ALL_TEST_PROBLEMS)
+    args.env["test_distribution"] = ["uniform"]
 
 
 def setup_distributed_training(args):
@@ -204,7 +181,6 @@ def configure_training_settings(args):
     assert args.n_size in [50, 100], f"n_size must be 50 or 100, got {args.n_size}"
 
     args.env["generator_params"]["num_loc"] = args.n_size
-    args.env["test_size_idx"] = [0] if args.n_size == 50 else [1]
 
     args.model_params["sqrt_embedding_dim"] = args.model_params["embedding_dim"] ** (
         1 / 2
@@ -313,11 +289,6 @@ if __name__ == "__main__":
         "task_set",
         "dist_set",
         "n_set",
-        "metric_label",
-        "test_metric_label",
-        "all_test_size",
-        "all_test_problem",
-        "all_test_distribution",
         "all_tuning_variants",
     }
     log_dict = {

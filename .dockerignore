@@ -1,0 +1,28 @@
+# Git & IDE
+.git
+.gitignore
+.idea
+.cursor/
+
+# Python caches
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache
+.mypy_cache
+
+# Run outputs (mount as volume instead)
+result/
+
+# Local notes
+command.txt
+commands.txt
+
+# Cython build artifacts (rebuilt inside the image)
+search/cython_heuristics/*.c
+search/cython_heuristics/*.so
+search/cython_heuristics/build/
+
+# Large datasets are mounted at runtime — keep image lean
+data/

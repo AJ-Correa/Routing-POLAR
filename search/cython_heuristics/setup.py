@@ -7,7 +7,7 @@ extensions = [
         "heuristics",
         ["heuristics.pyx"],
         include_dirs=[np.get_include()],
-        extra_compile_args=["-O3", "-march=native"],  # Maximum optimization
+        extra_compile_args=["-O3"],  # portable; avoid -march=native for Docker/cross-machine builds
     )
 ]
 
