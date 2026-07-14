@@ -438,4 +438,4 @@ Maximo, V. R., Cordeau, J.-F., & Nascimento, M. C. V. (2024). AILS-II: An Adapti
 
 ## 📄 License
 
-This project is licensed under the MIT License.
+This project is licensed under the MIT License — see [LICENSE](LICENSE).

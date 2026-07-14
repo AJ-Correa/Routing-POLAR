@@ -106,6 +106,7 @@ class VRPTuner:
     def __init__(self, args):
         clear_gpu()
         self.args = args
+        args.trainer_params["po_B"] = args.tuner_params.get("po_B")
         torch.set_default_tensor_type("torch.cuda.FloatTensor")
 
         self._build_core_components()
@@ -742,11 +743,10 @@ class VRPTuner:
                             loss = loss + self.model.aux_loss
                         (self.scaler.scale(loss) if self.use_scaler else loss).backward()
 
-                        # Clip gradients for RL mode
-                        if self.loss_function == "rl":
-                            grad_norms, grad_norms_clipped = clip_grad_norms(
-                                self.optimizer.param_groups, 1.0
-                            )
+                        # Clip gradients
+                        grad_norms, grad_norms_clipped = clip_grad_norms(
+                            self.optimizer.param_groups, 1.0
+                        )
 
                         # Optimizer step
                         if self.use_scaler:
