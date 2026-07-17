@@ -11,6 +11,9 @@ class EncoderLayer(nn.Module):
         embedding_dim = self.model_params["embedding_dim"]
         head_num = self.model_params["head_num"]
         qkv_dim = self.model_params["qkv_dim"]
+        # Depth-aware residual scale (GPT-2 style): keeps Pre-LN + SiGLU stable at large L
+        num_layers = max(1, int(model_params.get("encoder_layer_num", 1)))
+        self.residual_scale = (2 * num_layers) ** -0.5
         self.Wq = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         self.Wk = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         self.Wv = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
@@ -27,10 +30,10 @@ class EncoderLayer(nn.Module):
         v = reshape_by_heads(self.Wv(normed), head_num=head_num)
         out_concat = multi_head_attention(q, k, v)
         multi_head_out = self.multi_head_combine(out_concat)
-        input2 = input1 + multi_head_out
+        input2 = input1 + multi_head_out * self.residual_scale
         normed2 = self.add_n_normalization_2(None, input2)
         ff_out = self.feed_forward(normed2)
-        return input2 + ff_out
+        return input2 + ff_out * self.residual_scale
 
 
 class VRP_Encoder(nn.Module):

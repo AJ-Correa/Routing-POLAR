@@ -1,50 +1,62 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from models.layers import *
 from models.helpers import *
 
 class DualBranchExpert(nn.Module):
     """
-    Traditional encoder layer, packaged as an expert.
-    Each expert has its own sparse branch, global branch, and combination layers.
+    One dual-branch encoder step (sparse + global), matching models/encoder.py:
+      - always fuse global -> sparse
+      - fuse sparse -> global only when update_global=True (skipped on last layer)
     """
     def __init__(self, model_params, use_sparse=True):
         super().__init__()
         self.model_params = model_params
         self.use_sparse = use_sparse
         self.p_num = model_params["p_num"]
-        
-        # Sparse branch
+
         mp_sparse = model_params.copy()
         mp_sparse["use_sparse"] = model_params.get("use_sparse", "topk") if use_sparse else False
         self.sparse_layer = EncoderLayer(**mp_sparse)
-        
-        # Global branch  
+
         mp_global = model_params.copy()
         mp_global["use_sparse"] = False
         self.global_layer = EncoderLayer(**mp_global)
-        
-        # Combination layers
+
         embed_dim = model_params["embedding_dim"]
         self.combine1 = nn.Linear(embed_dim, embed_dim)  # global -> sparse
         self.combine2 = nn.Linear(embed_dim, embed_dim)  # sparse -> global
-        
-    def forward(self, x_sparse, x_global, num_nodes, coords, rope_cos, rope_sin, rope_module):
-        # x_sparse: (B, N, D)  (N is num_nodes)
-        # x_global: (B, N + p_num, D)
-        
-        out_sparse = self.sparse_layer(x_sparse, coords=coords, rope_cos=rope_cos, 
-                                       rope_sin=rope_sin, rope_module=rope_module)
-        
-        out_global = self.global_layer(x_global, coords=coords, rope_cos=rope_cos,
-                                       rope_sin=rope_sin, rope_module=rope_module)
-        
-        # Combine: same logic as before
+
+    def forward(
+        self,
+        x_sparse,
+        x_global,
+        num_nodes,
+        coords,
+        rope_cos,
+        rope_sin,
+        rope_module,
+        update_global=True,
+    ):
+        out_sparse = self.sparse_layer(
+            x_sparse, coords=coords, rope_cos=rope_cos,
+            rope_sin=rope_sin, rope_module=rope_module,
+        )
+        out_global = self.global_layer(
+            x_global, coords=coords, rope_cos=rope_cos,
+            rope_sin=rope_sin, rope_module=rope_module,
+        )
+
+        # Always: global -> sparse (same as layers1combine)
         out_sparse = out_sparse + self.combine1(out_global[:, :num_nodes])
-        out_global_res = out_global[:, :num_nodes] + self.combine2(out_sparse)
-        
-        out_global = torch.cat([out_global_res, out_global[:, num_nodes:]], dim=1)
+
+        # Sparse -> global only when not the last encoder layer
+        if update_global:
+            out_global_nodes = out_global[:, :num_nodes] + self.combine2(out_sparse)
+            out_global = torch.cat([out_global_nodes, out_global[:, num_nodes:]], dim=1)
+
         return out_sparse, out_global
 
 class PLELayer(nn.Module):
@@ -57,69 +69,103 @@ class PLELayer(nn.Module):
         self.num_task_groups = num_task_groups
         self.embed_dim = model_params["embedding_dim"]
 
-        # Shared expert: visible to all tasks
         self.shared_expert = DualBranchExpert(model_params, use_sparse=True)
-
-        # Task-specific experts: each group has its own private experts
         self.task_experts = nn.ModuleList([
-            DualBranchExpert(model_params, use_sparse=False)
+            DualBranchExpert(model_params, use_sparse=True)
             for _ in range(num_task_groups)
         ])
 
         self.prompt_depth_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
-
-        # Task gate input is progressive: task routing observes what shared experts computed.
         self.task_gate_proj = nn.Sequential(
             nn.Linear(self.embed_dim * 2, self.embed_dim),
             nn.ReLU(),
-            nn.Linear(self.embed_dim, num_task_groups + 1)
+            nn.Linear(self.embed_dim, num_task_groups + 1),
         )
 
-        # Learnable per-layer residual alpha
         _init = torch.logit(torch.tensor(0.1))
         self.alpha_sparse = nn.Parameter(_init.clone())
-        self.alpha_global  = nn.Parameter(_init.clone())
-        
-    def forward(self, shared_sparse_in, shared_global_in, task_sparse_in, task_global_in, num_nodes, prompt_embedding, coords, rope_cos, rope_sin, rope_module):
-        # --- 1. Shared Expert (single) ---
+        self.alpha_global = nn.Parameter(_init.clone())
+
+        # Stabilize gated blending across stacked PLE layers
+        self.shared_norm_sparse = RMSNorm(self.embed_dim)
+        self.shared_norm_global = RMSNorm(self.embed_dim)
+        self.task_norm_sparse = RMSNorm(self.embed_dim)
+        self.task_norm_global = RMSNorm(self.embed_dim)
+
+    def forward(
+        self,
+        shared_sparse_in,
+        shared_global_in,
+        task_sparse_in,
+        task_global_in,
+        num_nodes,
+        prompt_embedding,
+        coords,
+        rope_cos,
+        rope_sin,
+        rope_module,
+        update_global=True,
+    ):
         shared_out_sparse, shared_out_global = self.shared_expert(
-            shared_sparse_in, shared_global_in, num_nodes, coords, rope_cos, rope_sin, rope_module
+            shared_sparse_in,
+            shared_global_in,
+            num_nodes,
+            coords,
+            rope_cos,
+            rope_sin,
+            rope_module,
+            update_global=update_global,
         )
-        
-        # Transform prompt through layer depth-specific projection
-        depth_prompt = self.prompt_depth_proj(prompt_embedding)  # (B, D)
+        shared_out_sparse = self.shared_norm_sparse(shared_out_sparse)
+        shared_out_global = self.shared_norm_global(shared_out_global)
 
-        # --- 2. Task-Specific Experts ---
-        shared_summary = shared_out_sparse.mean(dim=1)                          # (B, D)
-        task_gate_input = torch.cat([depth_prompt, shared_summary], dim=-1)     # (B, 2D)
-        task_gate_weights = F.softmax(self.task_gate_proj(task_gate_input), dim=-1)  # (B, K_t + 1)
+        depth_prompt = self.prompt_depth_proj(prompt_embedding)
+        shared_summary = shared_out_sparse.mean(dim=1)
+        gate_weights = F.softmax(
+            self.task_gate_proj(torch.cat([depth_prompt, shared_summary], dim=-1)),
+            dim=-1,
+        )
 
-        task_specific_weights = task_gate_weights[:, :self.num_task_groups]     # (B, K_t)
-        task_shared_weights   = task_gate_weights[:, self.num_task_groups:]     # (B, 1)
+        task_weights = gate_weights[:, : self.num_task_groups]
+        shared_weight = gate_weights[:, self.num_task_groups :]
+        # Renormalize task gates so blending keeps unit mass; shared uses shared_weight + alpha
+        task_weights = task_weights / task_weights.sum(dim=-1, keepdim=True).clamp(min=1e-6)
 
         task_outputs_sparse = []
         task_outputs_global = []
         for expert in self.task_experts:
-            s, g = expert(shared_out_sparse, task_global_in, num_nodes, coords, rope_cos, rope_sin, rope_module)
+            s, g = expert(
+                task_sparse_in,
+                task_global_in,
+                num_nodes,
+                coords,
+                rope_cos,
+                rope_sin,
+                rope_module,
+                update_global=update_global,
+            )
             task_outputs_sparse.append(s)
             task_outputs_global.append(g)
 
-        task_stack_sparse = torch.stack(task_outputs_sparse, dim=0)
-        task_stack_global = torch.stack(task_outputs_global, dim=0)
+        task_out_sparse = torch.einsum(
+            "k b n d, b k -> b n d",
+            torch.stack(task_outputs_sparse, dim=0),
+            task_weights,
+        )
+        task_out_global = torch.einsum(
+            "k b n d, b k -> b n d",
+            torch.stack(task_outputs_global, dim=0),
+            task_weights,
+        )
 
-        task_out_sparse  = torch.einsum('k b n d, b k -> b n d', task_stack_sparse, task_specific_weights)
-        task_out_global  = torch.einsum('k b n d, b k -> b n d', task_stack_global, task_specific_weights)
-        
-        # Weighted shared contribution (single expert, so just scale)
-        shared_contrib_s = shared_out_sparse * task_shared_weights.unsqueeze(-1)
-        shared_contrib_g = shared_out_global * task_shared_weights.unsqueeze(-1)
-
-        # Learnable alpha residual
         alpha_s = torch.sigmoid(self.alpha_sparse)
         alpha_g = torch.sigmoid(self.alpha_global)
-
-        final_task_sparse = task_out_sparse + alpha_s * shared_contrib_s
-        final_task_global = task_out_global + alpha_g * shared_contrib_g
+        final_task_sparse = self.task_norm_sparse(
+            task_out_sparse + alpha_s * shared_out_sparse * shared_weight.unsqueeze(-1)
+        )
+        final_task_global = self.task_norm_global(
+            task_out_global + alpha_g * shared_out_global * shared_weight.unsqueeze(-1)
+        )
 
         return shared_out_sparse, shared_out_global, final_task_sparse, final_task_global
 
@@ -213,12 +259,23 @@ class VRP_Encoder(nn.Module):
             if i == 0:
                 shared_global_in = torch.cat([shared_global_in, prompt], dim=1)
                 task_global_in = torch.cat([task_global_in, prompt], dim=1)
-            
+
+            # Match non-PLE encoder: skip sparse->global fuse on the last layer
+            update_global = i != len(self.ple_layers) - 1
             s_sparse, s_global, t_sparse, t_global = ple_layer(
-                shared_sparse_in, shared_global_in, task_sparse_in, task_global_in, num_nodes,
-                prompt_for_gate, coords, rope_cos, rope_sin, rope_module
+                shared_sparse_in,
+                shared_global_in,
+                task_sparse_in,
+                task_global_in,
+                num_nodes,
+                prompt_for_gate,
+                coords,
+                rope_cos,
+                rope_sin,
+                rope_module,
+                update_global=update_global,
             )
-            
+
             shared_sparse_in = s_sparse
             shared_global_in = s_global
             task_sparse_in = t_sparse
