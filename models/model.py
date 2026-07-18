@@ -1,42 +1,43 @@
-import time
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import os
-import numpy as np
 import concurrent.futures
 import multiprocessing as mp
+import os
+import time
+
+import numpy as np
+import torch
+import torch.nn as nn
+
 from search import _ls_instance_iterated
 from search.vrplib_helpers import vrplib_round_func_from_id
-
 from utils.functions import batchify, gather_by_index
 
+from models.decoder import VRP_Decoder
 from models.encoder import VRP_Encoder
 from models.encoder_ple import VRP_Encoder as VRP_Encoder_PLE
-from models.decoder import VRP_Decoder
-from models.layers import *
-from models.helpers import *
+from models.helpers import PrecomputedCache, reshape_by_heads
+from models.layers import PromptNet
 
 
 class VRPModel(nn.Module):
+    """RouteFinder-based main model (single-stream encoder + optional PLE / PGB)."""
+
     def __init__(self, args):
         super().__init__()
         self.args = args
         self.loss_mode = "rl"
         if self.args.model_params.get("use_ple", False):
             self.encoder = VRP_Encoder_PLE(**args.model_params)
+            self.prompt_net = PromptNet(args)
         else:
             self.encoder = VRP_Encoder(**args.model_params)
+            self.prompt_net = None
         self.decoder = VRP_Decoder(**args.model_params)
-        self.encoded_nodes = None  # (batch, N + M, EMBEDDING_DIM)
-        self.encoded_coords = None  # (batch, N + M, 2)
+        self.encoded_nodes = None
+        self.encoded_coords = None
         self.now_p_type = None
-        self.prompt_net = PromptNet(args)
 
     @staticmethod
     def greedy(logprobs, mask=None):
-        """Select the action with the highest probability."""
         selected = logprobs.argmax(dim=-1)
         if mask is not None:
             assert not (~mask).gather(1, selected.unsqueeze(-1)).data.any(), (
@@ -46,7 +47,6 @@ class VRPModel(nn.Module):
 
     @staticmethod
     def sampling(logprobs, log, mask=None):
-        """Sample an action with a multinomial distribution given to the log probabilities."""
         probs = logprobs.exp()
         selected = torch.multinomial(probs, 1).squeeze(1)
         if mask is not None:
@@ -59,30 +59,25 @@ class VRPModel(nn.Module):
         return selected
 
     def set_loss_mode(self, mode: str):
-        """Set loss mode to RL or PO."""
         self.loss_mode = mode
 
-    def forward(self, td, env, reld_alpha=1.0, with_greedy=False):
-        """Main forward pass: encode -> decode -> compute reward.
+    def _encode(self, td):
+        if self.prompt_net is not None:
+            prompt = self.prompt_net(td)["prompt"]
+            return self.encoder(td, prompt)
+        return self.encoder(td)
 
-        When ``with_greedy=True`` (used during PO+LS training) the environment
-        appends an extra start at depot node 0.  All normal POMO starts are
-        decoded by sampling; the depot-0 start is decoded greedily.  This
-        happens inside a single forward pass — no second encode, no extra call.
+    def forward(self, td, env, with_greedy=False):
+        """Encode -> multi-start decode -> reward.
+
+        When ``with_greedy=True`` (PO+LS), the env appends a depot-0 start that
+        is decoded greedily; other POMO starts are sampled.
         """
         args = self.args
-        # Generate task-specific prompts from constraint flags
-        p_out = self.prompt_net(td)
-        prompt = p_out["prompt"]
-        # Encode nodes to get embeddings
-        node_embed, node_coords = self.encoder(td, prompt)
-
-        # Cache encoder output so route_forward can reuse it (sync trainer_2 path)
-        # (valid only within the same forward/backward step)
+        node_embed, node_coords = self._encode(td)
         self.encoded_nodes = node_embed
         self.encoded_coords = node_coords
 
-        # Select POMO start nodes for multi-start decoding
         if self.training and self.loss_mode == "po":
             try:
                 po_B = args.trainer_params.get("po_B", None)
@@ -95,11 +90,9 @@ class VRPModel(nn.Module):
         )
         start_actions = start_actions.to(td.device)
 
-        # Expand batch for multi-start
         greedy_mask = greedy_mask.to(td.device).bool()
         td = batchify(td, num_starts)
 
-        # Handle greedy mask size mismatch
         if greedy_mask.numel() != td.batch_size[0] * num_starts:
             batch = td.batch_size[0]
             if greedy_mask.numel() == num_starts:
@@ -109,17 +102,14 @@ class VRPModel(nn.Module):
                     torch.bool
                 )
 
-        # Initialize tracking lists
         logprobs_list = [
             torch.zeros_like(start_actions, dtype=torch.float32, device=td.device)
         ]
         actions_list = [start_actions]
 
-        # First step: depot/customer selection
         td.set("action", start_actions)
         td = env.step(td)["next"]
 
-        # Multi-depot: handle second start action if present
         pomo_customer_starts = (
             env.get_pomo_customer_starts()
             if hasattr(env, "get_pomo_customer_starts")
@@ -135,8 +125,7 @@ class VRPModel(nn.Module):
             actions_list.append(pomo_customer_starts)
             td.set("action", pomo_customer_starts)
             td = env.step(td)["next"]
-        
-        # Prepare decoder cache for efficient attention
+
         decoder_k = reshape_by_heads(
             self.decoder.Wk(node_embed), head_num=args.model_params["head_num"]
         )
@@ -146,25 +135,12 @@ class VRPModel(nn.Module):
         decoder_single_head_k = node_embed.transpose(1, 2)
 
         cache = PrecomputedCache(
-            node_embed,
-            decoder_k,
-            decoder_v,
-            decoder_single_head_k,
-            node_coords,
+            node_embed, decoder_k, decoder_v, decoder_single_head_k, node_coords
         )
 
-        # Autoregressive decoding loop
-        step = 0
         while not td["done"].all():
-            logprobs, mask, cache = self.decoder(
-                td,
-                cache,
-                num_starts,
-                reld_alpha=reld_alpha,
-            )
-
+            logprobs, mask, cache = self.decoder(td, cache, num_starts)
             if self.training:
-                # Sample for all starts; greedy for the depot-0 slot
                 if greedy_mask.any():
                     select_sample = VRPModel.sampling(logprobs, self.args.log, mask)
                     select_greedy = VRPModel.greedy(logprobs, mask)
@@ -173,15 +149,12 @@ class VRPModel(nn.Module):
                     select = VRPModel.sampling(logprobs, self.args.log, mask)
             else:
                 select = VRPModel.greedy(logprobs, mask)
-
             logprobs = gather_by_index(logprobs, select, dim=1)
             td.set("action", select)
             actions_list.append(select)
             logprobs_list.append(logprobs)
             td = env.step(td)["next"]
-            step += 1
 
-        # Compute final reward and return
         logprobs = torch.stack(logprobs_list, 1)
         actions = torch.stack(actions_list, 1)
         rew, tours = env.get_reward(td, actions)
@@ -189,13 +162,11 @@ class VRPModel(nn.Module):
         assert (logprobs > -1000).data.all(), (
             "Logprobs should not be -inf, check sampling procedure!"
         )
-        out = {
+        return {
             "reward": td["reward"],
             "log_likelihood": logprobs,
             "tours": tours,
         }
-
-        return out
 
     def route_forward(
         self,
@@ -206,34 +177,18 @@ class VRPModel(nn.Module):
         num_starts,
         node_embed=None,
         node_coords=None,
-        reld_alpha=1.0,
     ):
-        """Compute log-likelihoods for LS-improved tours.
-
-        When node_embed and node_coords are provided (sync trainer_2 path), the
-        encoder is skipped — saving one full pass through the 6 dual-branch
-        transformer layers.  When they are None (async trainer / profiler paths),
-        the encoder runs as normal.
-
-        Parameters
-        ----------
-        node_embed  : (batch, N+1, embedding_dim) or None
-        node_coords : (batch, N+1, 2) or None
-        """
+        """Compute log-likelihoods for given tours (LS / PO sync path)."""
         if tours.dim() != 2:
             raise ValueError("tours must be 2D: [batch, steps]")
         if tour_lengths.dim() != 1 or tour_lengths.size(0) != tours.size(0):
             raise ValueError("tour_lengths must be 1D with same batch as tours")
 
-        # Run encoder only when embeddings are not pre-supplied
         if node_embed is None or node_coords is None:
-            p_out = self.prompt_net(td)
-            prompt = p_out["prompt"]
-            node_embed, node_coords = self.encoder(td, prompt)
+            node_embed, node_coords = self._encode(td)
 
         td = batchify(td, num_starts)
 
-        # Prepare decoder cache (3 linear projections)
         decoder_k = reshape_by_heads(
             self.decoder.Wk(node_embed), head_num=self.args.model_params["head_num"]
         )
@@ -250,19 +205,14 @@ class VRPModel(nn.Module):
             node_coords,
         )
 
-        # Replay tour steps and compute log-probs
         actions_list = []
         logprobs_list = []
-
         step = 0
 
         while not td["done"].all():
-            logprobs, _, cache = self.decoder(
-                td, cache, num_starts, reld_alpha=reld_alpha
-            )
+            logprobs, _, cache = self.decoder(td, cache, num_starts)
             action = tours[:, step]
             logprobs = gather_by_index(logprobs, action.unsqueeze(1), dim=1)
-
             td.set("action", action)
             actions_list.append(action)
             logprobs_list.append(logprobs)
@@ -275,7 +225,6 @@ class VRPModel(nn.Module):
         assert (logprobs > -1000).data.all(), (
             "Logprobs should not be -inf, check sampling procedure!"
         )
-
         return {"reward": reward, "log_likelihood": logprobs, "tours": tours_out}
 
     @torch.inference_mode()
@@ -304,11 +253,7 @@ class VRPModel(nn.Module):
         po_B = args.trainer_params.get("po_B", None)
         neural_start = time.perf_counter()
 
-        # ═════════════════════════════════════════════════════════════════
-        # ONCE: encode + build static decoder cache (never changes)
-        # ═════════════════════════════════════════════════════════════════
-        p_out = self.prompt_net(td_orig)
-        node_embed, node_coords = self.encoder(td_orig, p_out["prompt"])
+        node_embed, node_coords = self._encode(td_orig)
 
         decoder_k = reshape_by_heads(
             self.decoder.Wk(node_embed), head_num=args.model_params["head_num"]
@@ -326,9 +271,6 @@ class VRPModel(nn.Module):
             node_coords,
         )
 
-        # ═════════════════════════════════════════════════════════════════
-        # ONCE: extract CPU data for LS (never changes)
-        # ═════════════════════════════════════════════════════════════════
         td_cpu = td_orig.cpu()
         locs_np = td_cpu["locs"].numpy()
         dlin_np = td_cpu["demand_linehaul"].numpy()
@@ -345,7 +287,6 @@ class VRPModel(nn.Module):
         else:
             num_depots_np = np.ones(batch_size, dtype=np.int64)
 
-        # Instance-specific mixed-backhaul flags from p_s_tag[:, 5].
         if "p_s_tag" in td_cpu.keys():
             mixed_backhaul_flags = td_cpu["p_s_tag"][:, 5].numpy().astype(bool)
         else:
@@ -354,9 +295,7 @@ class VRPModel(nn.Module):
         best_reward = None
         best_tours = None
 
-        # ── Decode ────────────────────────────────────────────────────
         td = td_orig.clone()
-
         num_starts, start_actions, greedy_mask = env.select_start_nodes(
             td, po_B=po_B, with_greedy=False
         )
@@ -384,16 +323,9 @@ class VRPModel(nn.Module):
             td_dec.set("action", pomo_cust)
             td_dec = env.step(td_dec)["next"]
 
-        # ── REUSE static cache instead of rebuilding ─────────────────
         cache = static_cache
-
-        # Autoregressive decode
         while not td_dec["done"].all():
-            logprobs, mask, cache = self.decoder(
-                td_dec,
-                cache,
-                num_starts,
-            )
+            logprobs, mask, cache = self.decoder(td_dec, cache, num_starts)
             select = VRPModel.greedy(logprobs, mask)
             actions_list.append(select)
             logprobs_list.append(gather_by_index(logprobs, select, dim=1))
@@ -403,7 +335,6 @@ class VRPModel(nn.Module):
         actions = torch.stack(actions_list, dim=1)
         reward_all, tours_all = env.get_reward(td_dec, actions)
 
-        # Best across POMO starts
         reward_2d = reward_all.view(num_starts, batch_size)
         tours_3d = tours_all.view(num_starts, batch_size, -1)
         best_start = reward_2d.argmax(dim=0)
@@ -411,7 +342,6 @@ class VRPModel(nn.Module):
         reward_iter = reward_2d[best_start, batch_idx]
         tours_iter = tours_3d[best_start, batch_idx]
 
-        # Update global best
         if best_reward is None:
             best_reward = reward_iter
             best_tours = tours_iter
@@ -441,9 +371,7 @@ class VRPModel(nn.Module):
             budget = float(num_seconds) if num_seconds is not None else 0.0
             ils_time_limit = max(0.0, budget - (time.perf_counter() - neural_start))
 
-        # ── Search ──────────────────────────────────
-        best_np = best_tours.cpu().numpy()  # ← only this moves per iteration
-
+        best_np = best_tours.cpu().numpy()
         ls_costs = np.empty(batch_size, dtype=np.float32)
         ls_tours_lst = [None] * batch_size
         futures_map = {}
@@ -458,12 +386,8 @@ class VRPModel(nn.Module):
                     locs_np[i],
                     dlin_np[i],
                     dbac_np[i],
-                    float(dlim_np[i, 0])
-                    if dlim_np.ndim == 2
-                    else float(dlim_np[i]),
-                    bool(open_np[i, 0])
-                    if open_np.ndim == 2
-                    else bool(open_np[i]),
+                    float(dlim_np[i, 0]) if dlim_np.ndim == 2 else float(dlim_np[i]),
+                    bool(open_np[i, 0]) if open_np.ndim == 2 else bool(open_np[i]),
                     tw_np[i],
                     svc_np[i],
                     int(num_depots_np[i]),
@@ -475,7 +399,9 @@ class VRPModel(nn.Module):
                     cap = td_cpu["vrplib_capacity"]
                     cap_i = int(cap[i, 0]) if cap.ndim > 1 else int(cap[i])
                     if "vrplib_round_func_id" in td_cpu.keys():
-                        rid = int(td_cpu["vrplib_round_func_id"][i].reshape(-1)[0].item())
+                        rid = int(
+                            td_cpu["vrplib_round_func_id"][i].reshape(-1)[0].item()
+                        )
                         round_func = vrplib_round_func_from_id(rid)
                     else:
                         round_func = "round"
@@ -511,10 +437,8 @@ class VRPModel(nn.Module):
                 i = futures_map[fut]
                 ls_costs[i], ls_tours_lst[i] = fut.result()
 
-        # Update best with LS results
         ls_reward = torch.tensor(-ls_costs, dtype=torch.float32, device=device)
         if use_vrplib:
-            # LS costs are already in CVRPLIB integer units (metric='vrplib').
             best_reward = ls_reward
         else:
             best_reward = torch.maximum(best_reward, ls_reward)

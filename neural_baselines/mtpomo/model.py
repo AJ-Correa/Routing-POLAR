@@ -58,7 +58,7 @@ class VRPModel(nn.Module):
             return self.encoder(td, prompt)
         return self.encoder(td)
 
-    def forward(self, td, env, reld_alpha=1.0, with_greedy=False):
+    def forward(self, td, env, with_greedy=False):
         args = self.args
         node_embed, node_coords = self._encode(td)
         self.encoded_nodes = node_embed
@@ -126,7 +126,7 @@ class VRPModel(nn.Module):
 
         while not td["done"].all():
             logprobs, mask, cache = self.decoder(
-                td, cache, num_starts, reld_alpha=reld_alpha
+                td, cache, num_starts
             )
             if self.training:
                 if greedy_mask.any():
@@ -165,7 +165,6 @@ class VRPModel(nn.Module):
         num_starts,
         node_embed=None,
         node_coords=None,
-        reld_alpha=1.0,
     ):
         if tours.dim() != 2:
             raise ValueError("tours must be 2D: [batch, steps]")
@@ -199,7 +198,7 @@ class VRPModel(nn.Module):
 
         while not td["done"].all():
             logprobs, _, cache = self.decoder(
-                td, cache, num_starts, reld_alpha=reld_alpha
+                td, cache, num_starts
             )
             action = tours[:, step]
             logprobs = gather_by_index(logprobs, action.unsqueeze(1), dim=1)

@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
-from einops import rearrange
 import torch.nn.functional as F
+from einops import rearrange
 
-from models.layers import *
-from models.helpers import *
-from utils.functions import unbatchify, gather_by_index
+from models.helpers import multi_head_attention, reshape_by_heads
+from models.layers import AddAndNorm, FeedForward, ParallelGatedMLP
+from utils.functions import gather_by_index, unbatchify
 
 
 class VRP_Decoder(nn.Module):
@@ -15,21 +15,54 @@ class VRP_Decoder(nn.Module):
         embedding_dim = self.model_params["embedding_dim"]
         head_num = self.model_params["head_num"]
         qkv_dim = self.model_params["qkv_dim"]
+
+        self.Wq_last = nn.Linear(embedding_dim + 5, head_num * qkv_dim, bias=False)
         self.Wk = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         self.Wv = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
-        self.Wq_last = nn.Linear(embedding_dim + 5, head_num * qkv_dim, bias=False)
 
-        self.use_reld = model_params.get("use_reld", False)
-        if self.use_reld:
+        # Preference-gated block (PGB; PoMtVRS)
+        self.use_gate = model_params.get("use_gate", False)
+        if self.use_gate:
+            self.W_gate = nn.Linear(embedding_dim + 5, head_num, bias=False)
             self.attr_mapping = nn.Linear(5, embedding_dim, bias=False)
-            self.decoder_ffn = FeedForward(**model_params)
+            self.add_n_normalization_1 = AddAndNorm(**model_params)
+            if model_params["ffd"] == "ffd":
+                self.feed_forward = FeedForward(**model_params)
+            elif model_params["ffd"] == "siglu":
+                assert embedding_dim == 128
+                self.feed_forward = ParallelGatedMLP()
+            else:
+                raise NotImplementedError
+            self.add_n_normalization_2 = AddAndNorm(**model_params)
 
-    def forward(self, td, cache, num_starts, reld_alpha=1.0):
+    def gate_and_attention_block(
+        self, out_concat, context_embedding, cur_node_embedding, state_embedding
+    ):
+        """Sparse gated attention + nonlinear residual refinement."""
+        B, S, HD = out_concat.shape
+        H = self.model_params["head_num"]
+        D = self.model_params["qkv_dim"]
+
+        y = out_concat.view(B, S, H, D)
+        gate = torch.sigmoid(self.W_gate(context_embedding))  # [B, S, H]
+        y = y * gate.unsqueeze(-1)
+        out_concat = y.view(B, S, H * D)
+
+        mh_atten_out = self.multi_head_combine(out_concat)
+        cur_attr_embedding = cur_node_embedding + self.attr_mapping(
+            state_embedding.clone()
+        )
+        out1 = self.add_n_normalization_1(cur_attr_embedding, mh_atten_out)
+        out2 = self.feed_forward(out1)
+        return self.add_n_normalization_2(out1, out2)
+
+    def forward(self, td, cache, num_starts):
         td = unbatchify(td, num_starts)
 
-        cur_node = td["current_node"]
-        cur_node_embedding = gather_by_index(cache.node_embeddings, cur_node, squeeze=False)
+        cur_node_embedding = gather_by_index(
+            cache.node_embeddings, td["current_node"], squeeze=False
+        )
 
         remaining_linehaul = td["vehicle_capacity"] - td["used_capacity_linehaul"]
         remaining_backhaul = td["vehicle_capacity"] - td["used_capacity_backhaul"]
@@ -43,28 +76,25 @@ class VRP_Decoder(nn.Module):
             ],
             dim=-1,
         )
-
         context_embedding = torch.cat([cur_node_embedding, state_embedding], dim=-1)
-
-        glimpse_k = cache.glimpse_key
-        glimpse_v = cache.glimpse_val
-        logit_k = cache.logit_key
 
         glimpse_q = reshape_by_heads(
             self.Wq_last(context_embedding), head_num=self.model_params["head_num"]
         )
         mask = td["action_mask"]
 
-        out_concat = multi_head_attention(glimpse_q, glimpse_k, glimpse_v, mask)
-        mh_atten_out = self.multi_head_combine(out_concat)
+        out_concat = multi_head_attention(
+            glimpse_q, cache.glimpse_key, cache.glimpse_val, mask
+        )
 
-        if self.use_reld:
-            reld_contrib = cur_node_embedding + self.attr_mapping(state_embedding.clone())
-            mh_atten_out = mh_atten_out + (reld_alpha * reld_contrib)
-            ffn_out = self.decoder_ffn(mh_atten_out)
-            mh_atten_out = mh_atten_out + (reld_alpha * ffn_out)
+        if self.use_gate:
+            mh_atten_out = self.gate_and_attention_block(
+                out_concat, context_embedding, cur_node_embedding, state_embedding
+            )
+        else:
+            mh_atten_out = self.multi_head_combine(out_concat)
 
-        score = torch.matmul(mh_atten_out, logit_k)
+        score = torch.matmul(mh_atten_out, cache.logit_key)
         score_scaled = score / self.model_params["sqrt_embedding_dim"]
 
         logits = rearrange(score_scaled, "b s l -> (s b) l", s=num_starts)

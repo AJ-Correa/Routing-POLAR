@@ -76,7 +76,7 @@ class VRP_Encoder(nn.Module):
         embedding_dim = model_params["embedding_dim"]
         encoder_layer_num = model_params["encoder_layer_num"]
         self.p_num = model_params.get("p_num", 6)
-        num_task_groups = model_params.get("ple_num_task_groups", 3)
+        num_task_groups = int(model_params.get("K", model_params.get("ple_num_task_groups", 3)))
 
         self.embedding_depot = nn.Linear(3, embedding_dim)
         self.embedding_node = nn.Linear(7, embedding_dim)

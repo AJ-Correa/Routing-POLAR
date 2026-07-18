@@ -59,7 +59,7 @@ class VRPModel(nn.Module):
             return self.encoder(td, prompt)
         return self.encoder(td)
 
-    def forward(self, td, env, reld_alpha=1.0, with_greedy=False):
+    def forward(self, td, env, with_greedy=False):
         args = self.args
         node_embed, node_coords, enc_moe_loss = self._encode(td)
         moe_losses = []
@@ -130,7 +130,7 @@ class VRPModel(nn.Module):
 
         while not td["done"].all():
             logprobs, mask, cache, step_moe_loss = self.decoder(
-                td, cache, num_starts, reld_alpha=reld_alpha
+                td, cache, num_starts
             )
             if isinstance(step_moe_loss, torch.Tensor):
                 moe_losses.append(step_moe_loss)
@@ -172,7 +172,6 @@ class VRPModel(nn.Module):
         num_starts,
         node_embed=None,
         node_coords=None,
-        reld_alpha=1.0,
     ):
         if tours.dim() != 2:
             raise ValueError("tours must be 2D: [batch, steps]")
@@ -208,7 +207,7 @@ class VRPModel(nn.Module):
 
         while not td["done"].all():
             logprobs, _, cache, step_moe_loss = self.decoder(
-                td, cache, num_starts, reld_alpha=reld_alpha
+                td, cache, num_starts
             )
             if isinstance(step_moe_loss, torch.Tensor):
                 moe_losses.append(step_moe_loss)

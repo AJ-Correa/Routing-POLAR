@@ -10,15 +10,15 @@ model_params:
   ff_hidden_dim: 512          # Feed-forward hidden dimension
   ffd: 'siglu'                # FFN type: 'ffd' (standard) or 'siglu' (ParallelGatedMLP)
   norm_type: 'rms'            # Normalization: 'rms', 'layer', 'instance', 'none'
-  use_sparse: 'topk'          # Sparse attention
   p_num: 6                    # Number of constraints (6 by default): O, L, TW, B, MB, MD
   logit_clipping: 10          # Logit clipping parameter
+  K: 3                        # Number of task-specific PLE experts
   
   # Feature switches
-  use_film: true              # FiLM (Feature-wise Linear Modulation) for task conditioning
-  use_reld: true              # Rethinking Light Decode-based solvers (Huang et al., 2025)
+  use_film: true              # FiLM (Feature-wise Linear Modulation) for task conditioning (Corrêa et al., 2026)
+  use_gate: true              # Preference-gated block (Meng et al., 2026)
   use_rope: true              # RoPE-2D (2D Rotary Positional Embeddings)
-  use_ple: true               # Progressive Layer Extraction
+  use_ple: false              # Progressive Layer Extraction
 
 
 # =============================================================================
@@ -29,7 +29,7 @@ tester_params:
   use_refinement: false        # Use AILS-II refinement
   ls_nb_granular: 30           # LS neighbourhood granularity (varphi in AILS-II; default 40)
   stop_condition: 'iterations' # 'iterations' or 'time' (ILS stopping criterion)
-  num_iters: 250              # Max iterations (when stop_condition=iterations)
+  num_iters: 250               # Max iterations (when stop_condition=iterations)
   num_seconds: null            # Wall-clock budget incl. neural decode (time mode); null in test_lib / Set-X ablation => 240*(n-1)/100
   dmax: 10                     # Initial target edge-distance between ref and post-LS solution (AILS-II default: 30)
   dmin: 5                      # Final target edge-distance (AILS-II default: 15)
@@ -49,11 +49,11 @@ trainer_params:
   
   # Loss function
   loss_function: 'po'         # 'po' (Preference Optimization) or 'rl' (REINFORCE)
-  po_alpha: 0.05              # PO temperature parameter
+  po_alpha: 0.01              # PO temperature parameter
   po_B: null                  # Number of solutions generated per instance (null = all POMO starts)
   
   # Local search
-  use_ls: true                # Enable local search during training
+  use_ls: false               # Enable local search during training
   ls_start_epoch: 250         # Epoch to activate local search
   ls_nb_granular: 20          # Neighbourhood granularity for PyVRP local search
 
@@ -127,5 +127,5 @@ env:
   test_epoch: [50, 150]       # Additional test epochs
   test_interval: 10           # Test every N epochs during training
   test_episodes: 1000         # Number of test instances per evaluation
-  test_batch_size: 100        # Batch size for testing
+  test_batch_size: 500        # Batch size for testing
   data_dir: './data'          # Directory containing datasets

@@ -69,13 +69,13 @@ Routing-POLAR/
 ├── 📄 trainer.py              # Training loop on 16 variants
 ├── 📄 tuner.py                # Fine-tuning on unseen variants (mb / md / both)
 ├── 📄 tester.py               # Evaluation on synthetic and CVRPLib instances
-├── 📂 models/                 # Transformer encoder, decoder, layers, helpers...
+├── 📂 models/                 # RouteFinder main model (encoder, PLE, decoder, layers)
 ├── 📂 envs/
 │   ├── 📂mtvrp/               # Single-depot multi-task environment
 │   └── 📂mtdvrp/              # Multi-depot environment
 ├── 📂 search/                 # PyVRP local search + AILS-II (`search/search.py`)
 │   └── 📂cython_heuristics/   # Cython distance heuristics (built in Dockerfile)
-├── 📂 neural_baselines/       # MTPOMO, MVMoE, RouteFinder
+├── 📂 neural_baselines/       # MTPOMO, MVMoE
 ├── 📂 utils/                  # Metrics, helpers
 ├── 📂 data/                   # Test datasets
 ├── 📂 result/                 # Checkpoints & logs
@@ -91,28 +91,26 @@ Routing-POLAR/
 The `neural_baselines/` folder provides alternative architectures that plug into the same training and evaluation pipeline:
 
 
-| Baseline        | Path                            |
-| --------------- | ------------------------------- |
-| **MTPOMO**      | `neural_baselines/mtpomo/`      |
-| **MVMoE**       | `neural_baselines/mvmoe/`       |
-| **RouteFinder** | `neural_baselines/routefinder/` |
+| Baseline   | Path                       |
+| ---------- | -------------------------- |
+| **MTPOMO** | `neural_baselines/mtpomo/` |
+| **MVMoE**  | `neural_baselines/mvmoe/`  |
 
 
-Each baseline exposes a `VRPModel` class compatible with `trainer.py` and `tuner.py`. You can:
+The default model under `models/` is **RouteFinder** (single-stream Pre-LN encoder, optional PLE / FiLM / RoPE / PGB). Each baseline exposes a `VRPModel` compatible with `trainer.py` / `tuner.py`. You can:
 
-- Enable the **PLE encoder** via `use_ple: true` in `config.yaml` (each baseline ships its own `encoder_ple.py`)
+- Enable the **PLE encoder** via `use_ple: true` in `config.yaml`
 - Train with **POLAR** — the locally augmented PO loss (`trainer_params.loss_function: 'po'` + `use_ls: true`)
 
 To run a baseline, replace the model import in `trainer.py` and/or `tuner.py`:
 
 ```python
-# Default (paper model)
+# Default (RouteFinder)
 from models.model import VRPModel
 
 # Baselines — uncomment one:
 # from neural_baselines.mtpomo.model import VRPModel
 # from neural_baselines.mvmoe.model import VRPModel
-# from neural_baselines.routefinder.model import VRPModel
 ```
 
 ---
@@ -133,12 +131,12 @@ All hyperparameters live in `config.yaml`. CLI flags override a subset (problem 
 | `ff_hidden_dim`     | Feed-forward hidden dimension                                | `512`     |
 | `ffd`               | FFN type: `'ffd'` (standard) or `'siglu'` (ParallelGatedMLP) | `'siglu'` |
 | `norm_type`         | Normalization: `'rms'`, `'layer'`, `'instance'`, `'none'`    | `'rms'`   |
-| `use_sparse`        | Sparse attention mode (`'topk'`, etc.)                       | `'topk'`  |
 | `p_num`             | Number of constraint prompt tokens (O, L, TW, B, MB, MD)     | `6`       |
 | `logit_clipping`    | Decoder logit clipping value                                 | `10`      |
-| `use_ple`           | Enable Progressive Layer Extraction encoder                  | `true`    |
+| `K`                 | Number of task-specific PLE experts                          | `3`       |
+| `use_ple`           | Enable Progressive Layer Extraction encoder                  | `false`   |
 | `use_film`          | Enable FiLM task conditioning                                | `true`    |
-| `use_reld`          | Enable ReLD                                                  | `true`    |
+| `use_gate`          | Enable preference-gated decoder block (PGB; PoMtVRS)         | `true`    |
 | `use_rope`          | Enable 2D Rotary Positional Embeddings                       | `true`    |
 
 
