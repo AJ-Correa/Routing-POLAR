@@ -19,8 +19,6 @@ from models.layers import PromptNet
 
 
 class VRPModel(nn.Module):
-    """RouteFinder-based main model (single-stream encoder + optional PLE / PGB)."""
-
     def __init__(self, args):
         super().__init__()
         self.args = args

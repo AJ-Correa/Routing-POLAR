@@ -29,6 +29,7 @@ from utils.functions import (
     get_distance,
     load_npz_to_tensordict,
     batchify,
+    get_torch_device,
 )
 from utils.metrics import gap_percent_mean_torch, gap_percent_scalar
 from search import Search
@@ -75,9 +76,12 @@ class VRPTester:
         self.augmentation = augmentation
         self.args = args
         self.console = Console()
+        self.device = getattr(args, "device", None) or str(get_torch_device())
 
-        # AMP configuration
-        self.use_amp = bool(args.trainer_params.get("use_amp", False))
+        # AMP configuration (CUDA only)
+        self.use_amp = bool(args.trainer_params.get("use_amp", False)) and (
+            self.device == "cuda"
+        )
         if torch.cuda.is_available():
             capability = torch.cuda.get_device_capability()
             self.supports_bf16 = capability[0] >= 8
@@ -85,6 +89,11 @@ class VRPTester:
         else:
             self.supports_bf16 = False
             self.amp_dtype = torch.float16
+
+    def _clear_cuda(self):
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     @torch.inference_mode()
     def test(self, epoch: int, test_dataloader: dict) -> Dict[str, float]:
@@ -97,8 +106,7 @@ class VRPTester:
             self.model.encoded_nodes = None
 
         # Force cleanup before starting
-        gc.collect()
-        torch.cuda.empty_cache()
+        self._clear_cuda()
 
         start_time = time.time()
         dataset_num = len(test_dataloader)
@@ -143,13 +151,13 @@ class VRPTester:
                     opt_cost = inp["opt_cost"].clone()
 
                     # Reset environment
-                    td = self.env.reset(td=inp.to("cuda"))
+                    td = self.env.reset(td=inp.to(self.device))
 
                     # Restore p_s_tag after reset
-                    td["p_s_tag"] = p_s_tag.to("cuda")
+                    td["p_s_tag"] = p_s_tag.to(self.device)
 
                     with torch.amp.autocast(
-                        device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp
+                        device_type=self.device, dtype=self.amp_dtype, enabled=self.use_amp
                     ):
                         td_aug = self.augmentation(td)
                         if args.ddp:
@@ -189,7 +197,7 @@ class VRPTester:
                         self.model.encoded_nodes = None
 
                     # Compute gap using stored opt_cost
-                    opt_score = opt_cost.to("cuda")
+                    opt_score = opt_cost.to(self.device)
                     gap = gap_percent_mean_torch(score.abs(), opt_score.abs())
                     aug_gap = gap_percent_mean_torch(aug_score.abs(), opt_score.abs())
                     metric_list = [
@@ -212,7 +220,7 @@ class VRPTester:
                     )
 
                     # Force memory cleanup every batch
-                    torch.cuda.empty_cache()
+                    self._clear_cuda()
 
                     all_metric.append(metric_list)
                     metric_info = metric2str(tmp_test_metric_label, metric_list)
@@ -222,7 +230,7 @@ class VRPTester:
 
             # Force cleanup after each dataset
             gc.collect()
-            torch.cuda.empty_cache()
+            self._clear_cuda()
 
             # Log dataset results
             if args.ddp:
@@ -256,7 +264,7 @@ class VRPTester:
 
         # Final cleanup
         gc.collect()
-        torch.cuda.empty_cache()
+        self._clear_cuda()
 
         # Save Excel files
         if hasattr(args, "result_dir") and args.result_dir:
@@ -330,7 +338,7 @@ class VRPTester:
 
         # Force cleanup before starting
         gc.collect()
-        torch.cuda.empty_cache()
+        self._clear_cuda()
 
         # Get variant folders based on variant_present
         variant_folders = self._get_variant_folders(data_dir, variant_present)
@@ -372,14 +380,14 @@ class VRPTester:
                     transient=True,
                 ) as progress:
                     # Load data
-                    td = load_npz_to_tensordict(test_file).to("cuda")
+                    td = load_npz_to_tensordict(test_file).to(self.device)
 
                     # Load solutions if available
                     opt_costs = None
                     if os.path.exists(sol_file):
                         sol_data = np.load(sol_file)
                         if "costs" in sol_data:
-                            opt_costs = torch.tensor(sol_data["costs"], device="cuda")
+                            opt_costs = torch.tensor(sol_data["costs"], device=self.device)
 
                     # Build p_s_tag
                     td = self._build_p_s_tag(td, variant_name, size)
@@ -406,7 +414,7 @@ class VRPTester:
                         batch_td = self.env.reset(td=batch_td)
 
                         with torch.amp.autocast(
-                            device_type="cuda",
+                            device_type=self.device,
                             dtype=self.amp_dtype,
                             enabled=self.use_amp,
                         ):
@@ -470,7 +478,7 @@ class VRPTester:
                             advance=1,
                             description=f"{eval_label}|{batch_metric_info}",
                         )
-                        torch.cuda.empty_cache()
+                        self._clear_cuda()
 
                     scores = torch.cat(all_scores)
                     aug_scores = torch.cat(all_aug_scores)
@@ -507,7 +515,7 @@ class VRPTester:
 
                     # Force cleanup
                     gc.collect()
-                    torch.cuda.empty_cache()
+                    self._clear_cuda()
 
                 # Log dataset results
                 if args.ddp:
@@ -521,11 +529,11 @@ class VRPTester:
 
                 del td, scores, aug_scores
                 gc.collect()
-                torch.cuda.empty_cache()
+                self._clear_cuda()
 
         # Final cleanup
         gc.collect()
-        torch.cuda.empty_cache()
+        self._clear_cuda()
 
         # Save Excel files
         if hasattr(args, "result_dir") and args.result_dir:
@@ -767,7 +775,7 @@ class VRPTester:
                     batch_size=[1],
                 )
 
-                td_reset = self.env.reset(td_instance, lib_data=True).to("cuda")
+                td_reset = self.env.reset(td_instance, lib_data=True).to(self.device)
 
                 # Build p_s_tag for CVRP
                 keep_mask = torch.zeros((td_reset.shape[0], 5), dtype=torch.bool)
@@ -776,13 +784,13 @@ class VRPTester:
                     [
                         keep_mask.float(),
                         torch.zeros(
-                            (td_reset.shape[0], 2), dtype=torch.float32, device="cuda"
+                            (td_reset.shape[0], 2), dtype=torch.float32, device=self.device
                         ),  # MB, MD
                         torch.full(
                             (td_reset.shape[0], 1),
                             td_reset["locs"].shape[1] / 2000,
                             dtype=torch.float32,
-                            device="cuda",
+                            device=self.device,
                         ),
                     ],
                     dim=-1,
@@ -800,7 +808,7 @@ class VRPTester:
                 # Solve
                 start_time = time.time()
                 with torch.amp.autocast(
-                    device_type="cuda", dtype=self.amp_dtype, enabled=self.use_amp
+                    device_type=self.device, dtype=self.amp_dtype, enabled=self.use_amp
                 ):
                     td = self.augmentation(td_reset)
                     if args.ddp:

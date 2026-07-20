@@ -35,6 +35,7 @@ from utils.functions import (
     gather_by_index,
     load_npz_to_tensordict,
     clip_grad_norms,
+    get_torch_device,
 )
 from search import Search, POLAR_SCALER
 from models.model import VRPModel
@@ -48,8 +49,9 @@ TRAIN_METRIC_LABELS = ("loss", "cost")
 def clear_gpu():
     """Clear GPU memory."""
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 # Generator settings for each tuning variant
@@ -107,7 +109,9 @@ class VRPTuner:
         clear_gpu()
         self.args = args
         args.trainer_params["po_B"] = args.tuner_params.get("po_B")
-        torch.set_default_tensor_type("torch.cuda.FloatTensor")
+        self.device = getattr(args, "device", None) or str(get_torch_device())
+        args.device = self.device
+        torch.set_default_device(torch.device(self.device))
 
         self._build_core_components()
         self._configure_training_tools()
@@ -123,7 +127,7 @@ class VRPTuner:
         """Initialize model and environment for fine-tuning."""
         args = self.args
 
-        self.model = VRPModel(args)
+        self.model = VRPModel(args).to(self.device)
 
         tuner_params = args.tuner_params
         self.variant_present = tuner_params.get("variant_present", "mb")
@@ -153,7 +157,9 @@ class VRPTuner:
                 data_dir=args.env.get("data_dir", "./data"),
             )
 
-        self.use_amp = bool(tuner_params.get("use_amp", True))
+        self.use_amp = bool(tuner_params.get("use_amp", True)) and (
+            self.device == "cuda"
+        )
 
         # AMP dtype: BF16 for Ampere+, otherwise FP16
         if torch.cuda.is_available():
@@ -212,7 +218,7 @@ class VRPTuner:
         checkpoint_fullname = "{path}/checkpoint-{epoch}.pt".format(**model_load)
         checkpoint = torch.load(
             checkpoint_fullname,
-            map_location="cuda",
+            map_location=self.device,
             weights_only=False,
         )
 
@@ -674,14 +680,14 @@ class VRPTuner:
 
                         # Generate new instances
                         self.env.generator.num_loc = args.n_size
-                        td = self.env.reset(batch_size=current_batch_size).to("cuda")
+                        td = self.env.reset(batch_size=current_batch_size).to(self.device)
                         td_initial = td.clone(recurse=True)
 
                         if args.ddp:
                             torch.distributed.barrier()
 
                         with torch.amp.autocast(
-                            device_type="cuda",
+                            device_type=self.device,
                             dtype=self.amp_dtype,
                             enabled=self.use_amp,
                         ):

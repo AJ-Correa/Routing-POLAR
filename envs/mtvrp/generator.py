@@ -15,7 +15,7 @@ from typing import Callable, Tuple, Union
 from tensordict.tensordict import TensorDict
 from torch.distributions import Uniform
 
-from utils.functions import get_distance, save_tensordict_to_npz
+from utils.functions import get_distance, save_tensordict_to_npz, get_torch_device
 
 log = logging.getLogger(__name__)
 
@@ -220,20 +220,27 @@ class MTVRPGenerator:
     def __call__(self, batch_size) -> TensorDict:
         """Generate a batch of MTVRP instances."""
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
+        device = get_torch_device()
         
         # Locations: depot + customers
-        locs = self.loc_sampler.sample((*batch_size, self.num_loc, 2)).to('cuda')
-        depot = torch.FloatTensor(*batch_size, 1, 2).to('cuda').uniform_(self.min_loc, self.max_loc)
+        locs = self.loc_sampler.sample((*batch_size, self.num_loc, 2)).to(device)
+        depot = torch.empty(*batch_size, 1, 2, device=device).uniform_(self.min_loc, self.max_loc)
         locs = torch.cat((depot, locs), dim=-2)
         
         # Vehicle capacity
-        vehicle_capacity = torch.full((*batch_size, 1), self.capacity, dtype=torch.float32)
+        vehicle_capacity = torch.full(
+            (*batch_size, 1), self.capacity, dtype=torch.float32, device=device
+        )
         capacity_original = vehicle_capacity.clone()
         
         # Demands
         demand_linehaul, demand_backhaul = self.generate_demands(batch_size, self.num_loc)
-        demand_linehaul = torch.cat([torch.zeros(size=(*batch_size, 1)), demand_linehaul], dim=1)
-        demand_backhaul = torch.cat([torch.zeros(size=(*batch_size, 1)), demand_backhaul], dim=1)
+        demand_linehaul = torch.cat(
+            [torch.zeros(*batch_size, 1, device=device), demand_linehaul], dim=1
+        )
+        demand_backhaul = torch.cat(
+            [torch.zeros(*batch_size, 1, device=device), demand_backhaul], dim=1
+        )
         
         # Backhaul class
         backhaul_class = self.generate_backhaul_class((*batch_size, 1), sample=self.sample_backhaul_class)
@@ -269,6 +276,7 @@ class MTVRPGenerator:
                 "speed": speed,
             },
             batch_size=batch_size,
+            device=device,
         )
         
         if self.subsample:
@@ -278,10 +286,11 @@ class MTVRPGenerator:
     def subsample_problems(self, td: TensorDict) -> TensorDict:
         """Subsample problems based on variant preset probabilities."""
         batch_size = td.batch_size[0]
-        variant_probs = torch.tensor(list(self.variant_probs.values()))
+        device = td.device
+        variant_probs = torch.tensor(list(self.variant_probs.values()), device=device)
         
         if self.use_combinations:
-            keep_mask = torch.rand(batch_size, 4) <= variant_probs  # O, TW, L, B
+            keep_mask = torch.rand(batch_size, 4, device=device) <= variant_probs  # O, TW, L, B
         else:
             if self.variant_preset in ("all", "cvrp", "single_feat"):
                 cvrp_prob = 0.5
@@ -290,12 +299,14 @@ class MTVRPGenerator:
             
             if self.variant_preset in ("all", "cvrp", "single_feat"):
                 indices = torch.distributions.Categorical(
-                    torch.Tensor(list(self.variant_probs.values()) + [cvrp_prob])[None].repeat(batch_size, 1)
+                    torch.tensor(
+                        list(self.variant_probs.values()) + [cvrp_prob], device=device
+                    )[None].repeat(batch_size, 1)
                 ).sample()
-                keep_mask = torch.zeros((batch_size, 5), dtype=torch.bool)
-                keep_mask[torch.arange(batch_size), indices] = True
+                keep_mask = torch.zeros((batch_size, 5), dtype=torch.bool, device=device)
+                keep_mask[torch.arange(batch_size, device=device), indices] = True
             else:
-                keep_mask = torch.zeros((batch_size, 4), dtype=torch.bool)
+                keep_mask = torch.zeros((batch_size, 4), dtype=torch.bool, device=device)
                 indices = torch.nonzero(variant_probs).squeeze()
                 keep_mask[:, indices] = True
         
@@ -313,7 +324,7 @@ class MTVRPGenerator:
         is_mixed_class = (td["backhaul_class"].squeeze(-1) == 2)
         is_mixed_backhaul = has_any_backhaul & is_mixed_class
         is_standard_backhaul = has_any_backhaul & (~is_mixed_class)
-        is_multi_depot = torch.zeros(batch_size, dtype=torch.bool)
+        is_multi_depot = torch.zeros(batch_size, dtype=torch.bool, device=device)
 
         p_s_tag = torch.cat([
             (~has_open[:, None]).float(),           # C
@@ -323,7 +334,7 @@ class MTVRPGenerator:
             is_standard_backhaul[:, None].float(),  # B
             is_mixed_backhaul[:, None].float(),     # MB
             is_multi_depot[:, None].float(),        # MD
-            torch.full((*td.batch_size, 1), (td['locs'].shape[1] - 1) / 2000, dtype=torch.float32), # size
+            torch.full((*td.batch_size, 1), (td['locs'].shape[1] - 1) / 2000, dtype=torch.float32, device=device), # size
         ], dim=-1)
         
         td['p_s_tag'] = p_s_tag
@@ -355,17 +366,18 @@ class MTVRPGenerator:
     
     def generate_demands(self, batch_size, num_loc: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Generate linehaul and backhaul demands."""
+        device = get_torch_device()
         linehaul_demand = (
-            torch.FloatTensor(*batch_size, num_loc).to('cuda')
+            torch.empty(*batch_size, num_loc, device=device)
             .uniform_(self.min_demand - 1, self.max_demand - 1).int() + 1
         ).float()
         
         backhaul_demand = (
-            torch.FloatTensor(*batch_size, num_loc).to('cuda')
+            torch.empty(*batch_size, num_loc, device=device)
             .uniform_(self.min_backhaul - 1, self.max_backhaul - 1).int() + 1
         ).float()
         
-        is_linehaul = torch.rand(*batch_size, num_loc) > self.backhaul_ratio
+        is_linehaul = torch.rand(*batch_size, num_loc, device=device) > self.backhaul_ratio
         backhaul_demand = backhaul_demand * ~is_linehaul
         linehaul_demand = linehaul_demand * is_linehaul
         
@@ -374,23 +386,24 @@ class MTVRPGenerator:
     def generate_time_windows(self, locs: torch.Tensor, speed: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Generate time windows and service times."""
         batch_size, n_loc = locs.shape[0], locs.shape[1] - 1
+        device = locs.device
         
         a, b, c = 0.15, 0.18, 0.2
-        service_time = a + (b - a) * torch.rand(batch_size, n_loc)
-        tw_length = b + (c - b) * torch.rand(batch_size, n_loc)
+        service_time = a + (b - a) * torch.rand(batch_size, n_loc, device=device)
+        tw_length = b + (c - b) * torch.rand(batch_size, n_loc, device=device)
         d_0i = get_distance(locs[:, 0:1], locs[:, 1:])
         h_max = (self.max_time - service_time - tw_length) / d_0i * speed - 1
-        tw_start = (1 + (h_max - 1) * torch.rand(batch_size, n_loc)) * d_0i / speed
+        tw_start = (1 + (h_max - 1) * torch.rand(batch_size, n_loc, device=device)) * d_0i / speed
         tw_end = tw_start + tw_length
         
         time_windows = torch.stack(
             (
-                torch.cat((torch.zeros(batch_size, 1), tw_start), -1),
-                torch.cat((torch.full((batch_size, 1), self.max_time), tw_end), -1),
+                torch.cat((torch.zeros(batch_size, 1, device=device), tw_start), -1),
+                torch.cat((torch.full((batch_size, 1), self.max_time, device=device), tw_end), -1),
             ),
             dim=-1,
         )
-        service_time = torch.cat((torch.zeros(batch_size, 1), service_time), dim=-1)
+        service_time = torch.cat((torch.zeros(batch_size, 1, device=device), service_time), dim=-1)
         
         return time_windows, service_time
     
@@ -406,17 +419,18 @@ class MTVRPGenerator:
     
     def generate_open_route(self, shape: Tuple[int, ...]) -> torch.Tensor:
         """Generate open route flags."""
-        return torch.ones(shape, dtype=torch.bool)
+        return torch.ones(shape, dtype=torch.bool, device=get_torch_device())
     
     def generate_speed(self, shape: Tuple[int, ...]) -> torch.Tensor:
         """Generate speed values."""
-        return torch.full(shape, self.speed, dtype=torch.float32)
+        return torch.full(shape, self.speed, dtype=torch.float32, device=get_torch_device())
     
     def generate_backhaul_class(self, shape: Tuple[int, ...], sample: bool = False) -> torch.Tensor:
         """Generate backhaul class (1=classical, 2=mixed)."""
+        device = get_torch_device()
         if sample:
-            return torch.randint(1, 3, shape, dtype=torch.float32)
-        return torch.full(shape, self.backhaul_class, dtype=torch.float32)
+            return torch.randint(1, 3, shape, dtype=torch.float32, device=device)
+        return torch.full(shape, self.backhaul_class, dtype=torch.float32, device=device)
     
     @staticmethod
     def save_data(td: TensorDict, path: str, compress: bool = False):

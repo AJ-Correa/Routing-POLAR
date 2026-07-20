@@ -14,7 +14,7 @@ from typing import Callable, Tuple, Union
 from tensordict.tensordict import TensorDict
 from torch.distributions import Uniform
 
-from utils.functions import get_distance, save_tensordict_to_npz
+from utils.functions import get_distance, save_tensordict_to_npz, get_torch_device
 
 log = logging.getLogger(__name__)
 
@@ -184,7 +184,7 @@ class MTVRPGenerator:
         # Number of depots
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
         num_depots = torch.full(
-            size=(*batch_size, 1), fill_value=self.num_depots, dtype=torch.int32, device='cuda'
+            size=(*batch_size, 1), fill_value=self.num_depots, dtype=torch.int32, device=str(get_torch_device())
         )
 
         # Locations
@@ -194,7 +194,7 @@ class MTVRPGenerator:
 
         # Vehicle capacity (C, B) - applies to both linehaul and backhaul
         vehicle_capacity = torch.full(
-            (*batch_size, 1), self.capacity, dtype=torch.float32, device='cuda'
+            (*batch_size, 1), self.capacity, dtype=torch.float32, device=str(get_torch_device())
         )
         capacity_original = vehicle_capacity.clone()
 
@@ -243,7 +243,7 @@ class MTVRPGenerator:
                 "speed": speed,  # common
             },
             batch_size=batch_size,
-            device='cuda',
+            device=str(get_torch_device()),
         )
 
         if self.subsample:
@@ -365,7 +365,7 @@ class MTVRPGenerator:
         """
         locs = torch.FloatTensor(*batch_size, num_depots + num_loc, 2).uniform_(
             self.min_loc, self.max_loc
-        ).cuda()
+        ).to(get_torch_device())
         return locs
 
     def generate_demands(self, batch_size: int, num_loc: int) -> torch.Tensor:
@@ -380,14 +380,14 @@ class MTVRPGenerator:
         """
         linehaul_demand = torch.FloatTensor(*batch_size, num_loc).uniform_(
             self.min_demand - 1, self.max_demand - 1
-        ).cuda()
+        ).to(get_torch_device())
         linehaul_demand = (linehaul_demand.int() + 1).float()
         # Backhaul demand sampling
         backhaul_demand = torch.FloatTensor(*batch_size, num_loc).uniform_(
             self.min_backhaul - 1, self.max_backhaul - 1
-        ).cuda()
+        ).to(get_torch_device())
         backhaul_demand = (backhaul_demand.int() + 1).float()
-        is_linehaul = torch.rand(*batch_size, num_loc, device='cuda') > self.backhaul_ratio
+        is_linehaul = torch.rand(*batch_size, num_loc, device=str(get_torch_device())) > self.backhaul_ratio
         backhaul_demand = (
             backhaul_demand * ~is_linehaul
         )  # keep only values where they are not linehauls
@@ -491,12 +491,12 @@ class MTVRPGenerator:
         """Generate open route flags (O). Here we could have a sampler but we simply return True here so all
         routes are open. Afterwards, we subsample the problems.
         """
-        return torch.ones(shape, dtype=torch.bool, device='cuda')
+        return torch.ones(shape, dtype=torch.bool, device=str(get_torch_device()))
 
     def generate_speed(self, shape: Tuple[int, int]):
         """We simply generate the speed as constant here"""
         # in this version, the speed is constant but this class may be overridden
-        return torch.full(shape, self.speed, dtype=torch.float32, device='cuda')
+        return torch.full(shape, self.speed, dtype=torch.float32, device=str(get_torch_device()))
 
     def generate_backhaul_class(self, shape: Tuple[int, int], sample: bool = False):
         """Generate backhaul class (B) for each node. If sample is True, we sample the backhaul class
@@ -505,9 +505,9 @@ class MTVRPGenerator:
         - Backhaul class 2: mixed backhaul (VRPMPD or VRPMB), linehauls and backhauls can be served in any order (every customer is either, not both)
         """
         if sample:
-            return torch.randint(1, 3, shape, dtype=torch.float32, device='cuda')
+            return torch.randint(1, 3, shape, dtype=torch.float32, device=str(get_torch_device()))
         else:
-            return torch.full(shape, self.backhaul_class, dtype=torch.float32, device='cuda')
+            return torch.full(shape, self.backhaul_class, dtype=torch.float32, device=str(get_torch_device()))
     
     @staticmethod
     def save_data(td: TensorDict, path: str, compress: bool = False):

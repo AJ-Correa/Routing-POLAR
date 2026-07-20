@@ -13,7 +13,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from trainer import VRPTrainer as Trainer
 from tuner import VRPTuner as Tuner
-from utils.functions import copy_all_src
+from utils.functions import copy_all_src, get_torch_device
 
 ALL_TEST_PROBLEMS = (
     "cvrp",
@@ -35,8 +35,22 @@ ALL_TEST_PROBLEMS = (
 )
 
 
-def setup_cuda_optimizations():
-    """Configure PyTorch/CUDA optimizations (Flash Attention, cuDNN, TF32)."""
+def setup_device(args):
+    """Select CUDA or CPU and set the global default device."""
+    args.device = str(get_torch_device())
+    torch.set_default_device(torch.device(args.device))
+
+    if args.device == "cpu":
+        print("\nWARNING: No CUDA GPUs available. The project will run on CPU.\n")
+    else:
+        print(f"\nUsing device: {args.device} ({torch.cuda.get_device_name()})\n")
+
+
+def setup_cuda_optimizations(args):
+    """Configure PyTorch/CUDA optimizations when a GPU is available."""
+    if args.device != "cuda":
+        return
+
     torch.backends.cuda.enable_flash_sdp(True)
     torch.backends.cuda.enable_mem_efficient_sdp(True)
     torch.backends.cuda.enable_math_sdp(True)
@@ -49,22 +63,22 @@ def setup_cuda_optimizations():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    if torch.cuda.is_available():
-        capability = torch.cuda.get_device_capability()
-        gpu_name = torch.cuda.get_device_name()
-        print(f"\n{'=' * 60}")
-        print(f"CUDA Optimizations Enabled:")
-        print(f"  GPU: {gpu_name} (Compute {capability[0]}.{capability[1]})")
-        print(f"  Flash SDP: {torch.backends.cuda.flash_sdp_enabled()}")
-        print(f"  TF32 enabled: {torch.backends.cuda.matmul.allow_tf32}")
-        print(f"{'=' * 60}\n")
+    capability = torch.cuda.get_device_capability()
+    gpu_name = torch.cuda.get_device_name()
+    print(f"\n{'=' * 60}")
+    print(f"CUDA Optimizations Enabled:")
+    print(f"  GPU: {gpu_name} (Compute {capability[0]}.{capability[1]})")
+    print(f"  Flash SDP: {torch.backends.cuda.flash_sdp_enabled()}")
+    print(f"  TF32 enabled: {torch.backends.cuda.matmul.allow_tf32}")
+    print(f"{'=' * 60}\n")
 
 
-def init_seeds(seed):
+def init_seeds(seed, device="cuda"):
     """Initialize random seeds for reproducibility."""
     random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    if device == "cuda" and torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
 
 
 def get_logger(args):
@@ -170,15 +184,23 @@ def setup_distributed_training(args):
     args.ddp = "LOCAL_RANK" in os.environ.keys()
 
     if args.ddp:
+        if args.device != "cuda":
+            raise RuntimeError("DDP requires CUDA. No GPU is available.")
         torch.cuda.set_device(args.local_rank)
         torch.distributed.init_process_group(backend="nccl")
-    else:
+    elif args.device == "cuda":
         torch.cuda.set_device(0)
 
 
 def configure_training_settings(args):
     """Configure training settings from arguments."""
     assert args.n_size in [50, 100], f"n_size must be 50 or 100, got {args.n_size}"
+
+    # AMP is CUDA-only in this codebase
+    if args.device != "cuda":
+        args.trainer_params["use_amp"] = False
+        if hasattr(args, "tuner_params"):
+            args.tuner_params["use_amp"] = False
 
     args.env["generator_params"]["num_loc"] = args.n_size
 
@@ -240,9 +262,9 @@ def setup_logging_and_wandb(args):
 
 
 def main(args):
-    """Main execution: setup CUDA, initialize, run training or fine-tuning."""
-    setup_cuda_optimizations()
-    init_seeds(args.seed)
+    """Main execution: setup device, initialize, run training or fine-tuning."""
+    setup_cuda_optimizations(args)
+    init_seeds(args.seed, device=args.device)
 
     runner = Tuner(args) if args.tune else Trainer(args)
     args.log(
@@ -268,6 +290,9 @@ if __name__ == "__main__":
     load_config(args)
     if args.variant is not None:
         args.tuner_params["variant_present"] = args.variant
+
+    # Device first: CUDA if available, otherwise CPU with a clear warning
+    setup_device(args)
 
     # Setup distributed training
     setup_distributed_training(args)

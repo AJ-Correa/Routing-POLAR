@@ -234,6 +234,11 @@ def get_distance(x: Tensor, y: Tensor):
     """Euclidean distance between two tensors of shape `[..., n, dim]`"""
     return (x - y).norm(p=2, dim=-1)
 
+
+def get_torch_device() -> torch.device:
+    """CUDA if available, otherwise CPU."""
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 def clip_grad_norms(param_groups, max_norm=math.inf):
     # optimizer.param_groups
     # Clips the norms for all param groups to max_norm and returns gradient norms before clipping

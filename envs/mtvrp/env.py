@@ -29,7 +29,7 @@ from torchrl.data import (
 from torchrl.envs import EnvBase
 from torch.utils.data import DataLoader
 
-from utils.functions import gather_by_index, get_distance, load_npz_to_tensordict
+from utils.functions import gather_by_index, get_distance, load_npz_to_tensordict, get_torch_device
 from envs.mtvrp.generator import MTVRPGenerator
 
 EPS = 1e-6
@@ -183,7 +183,7 @@ class MTVRPEnv(EnvBase):
         if batch_size is None:
             batch_size = td.batch_size
         if td is None or td.is_empty():
-            td = self.generator(batch_size=batch_size).to("cuda")
+            td = self.generator(batch_size=batch_size).to(get_torch_device())
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
         self.to(td.device)
         return super().reset(td, batch_size=batch_size, lib_data=lib_data)

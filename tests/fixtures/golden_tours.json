@@ -1,0 +1,14 @@
+{
+  "cvrp5_closed": {
+    "actions": [1, 2, 3, 4, 0],
+    "open_route": false
+  },
+  "cvrp5_open": {
+    "actions": [1, 2, 3, 4],
+    "open_route": true
+  },
+  "cvrp5_alt": {
+    "actions": [1, 3, 2, 4, 0],
+    "open_route": false
+  }
+}

@@ -42,8 +42,9 @@ TRAIN_METRIC_LABELS = ("loss", "cost")
 def clear_gpu():
     """Clear GPU memory by collecting garbage and emptying CUDA cache."""
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 def transform_dict_to_mean(dict_):
@@ -64,7 +65,9 @@ class VRPTrainer:
     def __init__(self, args):
         clear_gpu()
         self.args = args
-        torch.set_default_tensor_type("torch.cuda.FloatTensor")
+        self.device = getattr(args, "device", None) or str(get_torch_device())
+        args.device = self.device
+        torch.set_default_device(torch.device(self.device))
 
         # Build core components: model, environment, loss settings
         self._build_core_components()
@@ -88,12 +91,14 @@ class VRPTrainer:
         args = self.args
 
         # Create MTL model
-        self.model = VRPModel(args)
+        self.model = VRPModel(args).to(self.device)
         cal_model_size(self.model, args)
 
         # Environment generates VRP instances and manages constraints
         self.env = MTVRPEnv(**args.env)
-        self.use_amp = bool(args.trainer_params.get("use_amp", False))
+        self.use_amp = bool(args.trainer_params.get("use_amp", False)) and (
+            self.device == "cuda"
+        )
 
         # AMP dtype: BF16 for Ampere+ (compute >= 8.0), otherwise FP16
         if torch.cuda.is_available():
@@ -164,7 +169,7 @@ class VRPTrainer:
 
         checkpoint_fullname = "{path}/checkpoint-{epoch}.pt".format(**model_load)
         checkpoint = torch.load(
-            checkpoint_fullname, map_location="cuda", weights_only=False
+            checkpoint_fullname, map_location=self.device, weights_only=False
         )
         model_state_dict = checkpoint["model_state_dict"]
         self.model.load_state_dict(model_state_dict, strict=True)
@@ -422,7 +427,7 @@ class VRPTrainer:
         # Temperature-scaled log-probabilities
         log_prob = self.args.trainer_params["po_alpha"] * log_likelihood
         log_prob_pair = log_prob[:, :, None] - log_prob[:, None, :]
-
+        
         pf_log = F.logsigmoid(log_prob_pair)
         loss = -torch.mean(pf_log * preference)
         return loss
@@ -540,12 +545,12 @@ class VRPTrainer:
                         batch_size = min(full_batch_size, remaining)
 
                         self.env.generator.reset_n_loc(n_loc)
-                        td = self.env.reset(batch_size=batch_size).to("cuda")
+                        td = self.env.reset(batch_size=batch_size).to(self.device)
                         td_initial = td.clone(recurse=True)
                         if args.ddp:
                             torch.distributed.barrier()
                         with torch.amp.autocast(
-                            device_type="cuda",
+                            device_type=self.device,
                             dtype=self.amp_dtype,
                             enabled=self.use_amp,
                         ):
@@ -684,7 +689,7 @@ class VRPTrainer:
                 )
                 ## on all devices
                 if args.ddp:
-                    metric_tensor_ = metric_tensor.to("cuda")
+                    metric_tensor_ = metric_tensor.to(self.device)
                     dist.reduce(metric_tensor_, dst=0)
                     if args.rank == 0:
                         metric_avg = metric_tensor_ / dist.get_world_size()
