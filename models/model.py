@@ -67,7 +67,7 @@ class VRPModel(nn.Module):
             return self.encoder(td, prompt)
         return self.encoder(td)
 
-    def forward(self, td, env, with_greedy=False):
+    def forward(self, td, env, with_greedy=False, gate_alpha=1.0):
         """Encode -> multi-start decode -> reward.
 
         When ``with_greedy=True`` (PO+LS), the env appends a depot-0 start that
@@ -139,7 +139,9 @@ class VRPModel(nn.Module):
         )
 
         while not td["done"].all():
-            logprobs, mask, cache = self.decoder(td, cache, num_starts)
+            logprobs, mask, cache = self.decoder(
+                td, cache, num_starts, gate_alpha=gate_alpha
+            )
             if self.training:
                 if greedy_mask.any():
                     select_sample = VRPModel.sampling(logprobs, self.args.log, mask)

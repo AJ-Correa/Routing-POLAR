@@ -549,8 +549,9 @@ class VRPTrainer:
                             dtype=self.amp_dtype,
                             enabled=self.use_amp,
                         ):
+                            gate_alpha = step / total_steps if epoch == 1 else 1.0
                             out = self.model(
-                                td, self.env, with_greedy=use_ls
+                                td, self.env, with_greedy=use_ls, gate_alpha=gate_alpha
                             )
                             reward = out["reward"].view(-1, batch_size)
                             if self.loss_function == "rl":

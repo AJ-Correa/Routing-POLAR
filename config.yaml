@@ -49,11 +49,11 @@ trainer_params:
   
   # Loss function
   loss_function: 'po'         # 'po' (Preference Optimization) or 'rl' (REINFORCE)
-  po_alpha: 0.01              # PO temperature parameter
+  po_alpha: 0.07              # PO temperature parameter
   po_B: null                  # Number of solutions generated per instance (null = all POMO starts)
   
   # Local search
-  use_ls: false               # Enable local search during training
+  use_ls: true                # Enable local search during training
   ls_start_epoch: 250         # Epoch to activate local search
   ls_nb_granular: 20          # Neighbourhood granularity for PyVRP local search
 

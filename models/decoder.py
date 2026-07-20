@@ -57,7 +57,7 @@ class VRP_Decoder(nn.Module):
         out2 = self.feed_forward(out1)
         return self.add_n_normalization_2(out1, out2)
 
-    def forward(self, td, cache, num_starts):
+    def forward(self, td, cache, num_starts, gate_alpha=1.0):
         td = unbatchify(td, num_starts)
 
         cur_node_embedding = gather_by_index(
@@ -88,9 +88,11 @@ class VRP_Decoder(nn.Module):
         )
 
         if self.use_gate:
-            mh_atten_out = self.gate_and_attention_block(
+            base_out = self.multi_head_combine(out_concat)
+            gate_out = self.gate_and_attention_block(
                 out_concat, context_embedding, cur_node_embedding, state_embedding
             )
+            mh_atten_out = base_out + gate_alpha * (gate_out - base_out)
         else:
             mh_atten_out = self.multi_head_combine(out_concat)
 
