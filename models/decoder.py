@@ -21,7 +21,7 @@ class VRP_Decoder(nn.Module):
         self.Wv = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
 
-        # Preference-gated block (PGB; PoMtVRS)
+        # Preference-gated block
         self.use_gate = model_params.get("use_gate", False)
         if self.use_gate:
             self.W_gate = nn.Linear(embedding_dim + 5, head_num, bias=False)
@@ -37,7 +37,7 @@ class VRP_Decoder(nn.Module):
             self.add_n_normalization_2 = AddAndNorm(**model_params)
 
     def gate_and_attention_block(
-        self, out_concat, context_embedding, cur_node_embedding, state_embedding
+        self, out_concat, context_embedding, cur_node_embedding, state_embedding, gate_alpha=None
     ):
         """Sparse gated attention + nonlinear residual refinement."""
         B, S, HD = out_concat.shape
@@ -55,7 +55,12 @@ class VRP_Decoder(nn.Module):
         )
         out1 = self.add_n_normalization_1(cur_attr_embedding, mh_atten_out)
         out2 = self.feed_forward(out1)
-        return self.add_n_normalization_2(out1, out2)
+        out3 = self.add_n_normalization_2(out1, out2)
+
+        if gate_alpha is not None:
+            return mh_atten_out + gate_alpha * (out3 - mh_atten_out)
+        else:
+            return out3
 
     def forward(self, td, cache, num_starts, gate_alpha=1.0):
         td = unbatchify(td, num_starts)
@@ -88,11 +93,14 @@ class VRP_Decoder(nn.Module):
         )
 
         if self.use_gate:
-            base_out = self.multi_head_combine(out_concat)
-            gate_out = self.gate_and_attention_block(
-                out_concat, context_embedding, cur_node_embedding, state_embedding
-            )
-            mh_atten_out = base_out + gate_alpha * (gate_out - base_out)
+            if gate_alpha < 1.0:
+                mh_atten_out = self.gate_and_attention_block(
+                    out_concat, context_embedding, cur_node_embedding, state_embedding, gate_alpha
+                )
+            else:
+                mh_atten_out = self.gate_and_attention_block(
+                    out_concat, context_embedding, cur_node_embedding, state_embedding
+                )
         else:
             mh_atten_out = self.multi_head_combine(out_concat)
 

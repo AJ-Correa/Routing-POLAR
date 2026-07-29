@@ -1,6 +1,7 @@
 # Run outputs (ignore by default)
 result/**
 old_result/**
+graphify-out/
 
 # Published paper checkpoints (epoch 300 only)
 !result/POLAR/
@@ -19,10 +20,14 @@ __pycache__/
 # IDE
 .idea/
 .cursor/
+AGENTS.md
 
 # Local profiling / experiment scripts
 scripts/
 command.txt
+
+# Images
+figures/
 
 # Cython extension: track sources only, not build artifacts
 search/cython_heuristics/**
