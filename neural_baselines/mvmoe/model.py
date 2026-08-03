@@ -59,7 +59,7 @@ class VRPModel(nn.Module):
             return self.encoder(td, prompt)
         return self.encoder(td)
 
-    def forward(self, td, env, with_greedy=False):
+    def forward(self, td, env, with_greedy=False, gate_alpha=1.0):
         args = self.args
         node_embed, node_coords, enc_moe_loss = self._encode(td)
         moe_losses = []

@@ -12,7 +12,7 @@ model_params:
   norm_type: 'rms'            # Normalization: 'rms', 'layer', 'instance', 'none'
   p_num: 6                    # Number of constraints (6 by default): O, L, TW, B, MB, MD
   logit_clipping: 10          # Logit clipping parameter
-  K: 5                        # Number of task-specific PLE experts
+  K: 3                        # Number of task-specific PLE experts
   
   # Feature switches
   use_film: true              # FiLM (Feature-wise Linear Modulation) for task conditioning (Corrêa et al., 2026)
@@ -97,7 +97,7 @@ tuner_params:
   # 'mb': 8 mixed backhaul single-depot variants
   # 'md': 16 multi-depot variants  
   # 'both': 8 multi-depot with mixed backhaul
-  variant_present: 'md'
+  variant_present: 'both'
 
 
 # =============================================================================

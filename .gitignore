@@ -2,6 +2,7 @@
 result/**
 old_result/**
 graphify-out/
+paper/
 
 # Published paper checkpoints (epoch 300 only)
 !result/POLAR/

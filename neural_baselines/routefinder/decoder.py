@@ -20,7 +20,7 @@ class VRP_Decoder(nn.Module):
         self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
         self.Wq_last = nn.Linear(embedding_dim + 5, head_num * qkv_dim, bias=False)
 
-    def forward(self, td, cache, num_starts, reld_alpha=1.0):
+    def forward(self, td, cache, num_starts):
         td = unbatchify(td, num_starts)
 
         cur_node = td["current_node"]
