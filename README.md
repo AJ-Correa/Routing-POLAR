@@ -93,11 +93,12 @@ The `neural_baselines/` folder provides alternative architectures that plug into
 
 | Baseline   | Path                       |
 | ---------- | -------------------------- |
-| **MTPOMO** | `neural_baselines/mtpomo/` |
-| **MVMoE**  | `neural_baselines/mvmoe/`  |
+| **MTPOMO**       | `neural_baselines/mtpomo/` |
+| **MVMoE**        | `neural_baselines/mvmoe/`  |
+| **RouteFinder**  | `neural_baselines/routefinder/`  |
 
 
-The default model under `models/` is **RouteFinder** (single-stream Pre-LN encoder, optional PLE / FiLM / RoPE / PGB). Each baseline exposes a `VRPModel` compatible with `trainer.py` / `tuner.py`. You can:
+The default model under `models/` is **Ours** model from the paper (single-stream Pre-LN encoder, optional PLE with FiLM, RoPE, GPT-2 residual scaling and optional PGB decoder gate). Each baseline exposes a `VRPModel` compatible with `trainer.py` / `tuner.py`. You can:
 
 - Enable the **PLE encoder** via `use_ple: true` in `config.yaml`
 - Train with **POLAR** — the locally augmented PO loss (`trainer_params.loss_function: 'po'` + `use_ls: true`)
@@ -134,10 +135,8 @@ All hyperparameters live in `config.yaml`. CLI flags override a subset (problem 
 | `p_num`             | Number of constraint prompt tokens (O, L, TW, B, MB, MD)     | `6`       |
 | `logit_clipping`    | Decoder logit clipping value                                 | `10`      |
 | `K`                 | Number of task-specific PLE experts                          | `3`       |
-| `use_ple`           | Enable Progressive Layer Extraction encoder                  | `false`   |
-| `use_film`          | Enable FiLM task conditioning                                | `true`    |
+| `use_ple`           | Enable Progressive Layered Extraction encoder | `false`   |
 | `use_gate`          | Enable preference-gated decoder block (PGB; PoMtVRS)         | `true`    |
-| `use_rope`          | Enable 2D Rotary Positional Embeddings                       | `true`    |
 
 
 ### 🔍 Tester Parameters (`tester_params`)

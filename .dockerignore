@@ -14,6 +14,9 @@ __pycache__
 
 # Run outputs (mount as volume instead)
 result/
+paper/
+old_result/
+graphify-out/
 
 # Local notes
 command.txt

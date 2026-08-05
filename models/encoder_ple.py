@@ -2,14 +2,61 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.encoder import EncoderLayer
-from models.layers import FiLMGenerator, RMSNorm, RoPE2D
+from models.encoder import PreNorm
+from models.helpers import multi_head_attention, reshape_by_heads
+from models.layers import FiLMGenerator, ParallelGatedMLP, RMSNorm, RoPE2D
+
+
+class PLEEncoderLayer(nn.Module):
+    """PLE expert layer"""
+
+    def __init__(self, **model_params):
+        super().__init__()
+        self.model_params = model_params
+        embedding_dim = self.model_params["embedding_dim"]
+        head_num = self.model_params["head_num"]
+        qkv_dim = self.model_params["qkv_dim"]
+        num_layers = max(1, int(model_params.get("encoder_layer_num", 1)))
+        self.residual_scale = (2 * num_layers) ** -0.5
+        self.Wq = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.Wk = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.Wv = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
+        self.add_n_normalization_1 = PreNorm(embedding_dim)
+        self.add_n_normalization_2 = PreNorm(embedding_dim)
+        self.feed_forward = ParallelGatedMLP(hidden_size=embedding_dim)
+
+    def forward(self, input1, coords=None, rope_cos=None, rope_sin=None, rope_module=None):
+        normed = self.add_n_normalization_1(None, input1)
+        head_num = self.model_params["head_num"]
+        q = reshape_by_heads(self.Wq(normed), head_num=head_num)
+        k = reshape_by_heads(self.Wk(normed), head_num=head_num)
+        v = reshape_by_heads(self.Wv(normed), head_num=head_num)
+
+        if rope_module is not None and rope_cos is not None:
+            n_coords = rope_cos.size(1)
+            n_tokens = q.size(2)
+            if n_tokens > n_coords:
+                q_nodes, q_prompt = q[:, :, :n_coords], q[:, :, n_coords:]
+                k_nodes, k_prompt = k[:, :, :n_coords], k[:, :, n_coords:]
+                q_nodes, k_nodes = rope_module(q_nodes, k_nodes, rope_cos, rope_sin)
+                q = torch.cat([q_nodes, q_prompt], dim=2)
+                k = torch.cat([k_nodes, k_prompt], dim=2)
+            else:
+                q, k = rope_module(q, k, rope_cos, rope_sin)
+
+        out_concat = multi_head_attention(q, k, v)
+        multi_head_out = self.multi_head_combine(out_concat)
+        input2 = input1 + multi_head_out * self.residual_scale
+        normed2 = self.add_n_normalization_2(None, input2)
+        ff_out = self.feed_forward(normed2)
+        return input2 + ff_out * self.residual_scale
 
 
 class GlobalExpert(nn.Module):
     def __init__(self, **model_params):
         super().__init__()
-        self.layer = EncoderLayer(**model_params)
+        self.layer = PLEEncoderLayer(**model_params)
 
     def forward(self, x, coords=None, rope_cos=None, rope_sin=None, rope_module=None):
         return self.layer(
@@ -39,8 +86,6 @@ class PLELayer(nn.Module):
         )
         _init = torch.logit(torch.tensor(0.1))
         self.alpha = nn.Parameter(_init.clone())
-        # Pre-norm experts: gated blending shrinks activations unless pathways
-        # are re-normalized explicitly.
         self.shared_norm = RMSNorm(self.embed_dim)
         self.task_norm = RMSNorm(self.embed_dim)
 
@@ -105,7 +150,7 @@ class PLELayer(nn.Module):
 
 
 class VRP_Encoder(nn.Module):
-    """RouteFinder PLE encoder: shared + K task experts (global/dense only)."""
+    """PLE encoder"""
 
     def __init__(self, **model_params):
         super().__init__()
@@ -119,16 +164,10 @@ class VRP_Encoder(nn.Module):
 
         self.embedding_depot = nn.Linear(3, embedding_dim)
         self.embedding_node = nn.Linear(7, embedding_dim)
-
-        self.use_film = model_params.get("use_film", False)
-        if self.use_film:
-            self.film_generator = FiLMGenerator(
-                num_constraints=6, embedding_dim=embedding_dim
-            )
-
-        self.use_rope = model_params.get("use_rope", False)
-        if self.use_rope:
-            self.rope = RoPE2D(head_dim=model_params["qkv_dim"])
+        self.film_generator = FiLMGenerator(
+            num_constraints=6, embedding_dim=embedding_dim
+        )
+        self.rope = RoPE2D(head_dim=model_params["qkv_dim"])
 
         self.ple_layers = nn.ModuleList(
             [
@@ -168,9 +207,8 @@ class VRP_Encoder(nn.Module):
         global_embeddings = self.embedding_depot(depot_feats)
         cust_embeddings = self.embedding_node(node_feats)
 
-        if self.use_film:
-            gamma, beta = self.film_generator(td["p_s_tag"][:, 1:7])
-            cust_embeddings = gamma * cust_embeddings + beta
+        gamma, beta = self.film_generator(td["p_s_tag"][:, 1:7])
+        cust_embeddings = gamma * cust_embeddings + beta
 
         out = torch.cat((global_embeddings, cust_embeddings), -2)
         return out, td["locs"], num_depots + node_feats.size(1)
@@ -179,10 +217,8 @@ class VRP_Encoder(nn.Module):
         out, coords, num_nodes = self._embed(td)
         prompt_for_gate = prompt.mean(dim=1) if prompt.dim() == 3 else prompt
 
-        rope_cos = rope_sin = rope_module = None
-        if self.use_rope:
-            rope_cos, rope_sin = self.rope._compute_rotation(coords)
-            rope_module = self.rope
+        rope_cos, rope_sin = self.rope._compute_rotation(coords)
+        rope_module = self.rope
 
         shared_x = out
         task_x = out

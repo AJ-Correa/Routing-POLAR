@@ -57,9 +57,7 @@ def model_params():
         "p_num": 6,
         "logit_clipping": 10,
         "K": 2,
-        "use_film": True,
         "use_gate": True,
-        "use_rope": True,
         "use_ple": False,
         "sqrt_embedding_dim": dim**0.5,
     }

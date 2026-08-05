@@ -2,17 +2,42 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .encoder import EncoderLayer
+from .layers import AddAndNorm, FeedForward, multi_head_attention, reshape_by_heads
+
+
+class PLEEncoderLayer(nn.Module):
+    def __init__(self, **model_params):
+        super().__init__()
+        self.model_params = model_params
+        embedding_dim = self.model_params["embedding_dim"]
+        head_num = self.model_params["head_num"]
+        qkv_dim = self.model_params["qkv_dim"]
+        self.Wq = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.Wk = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.Wv = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
+        self.add_n_normalization_1 = AddAndNorm(**model_params)
+        self.add_n_normalization_2 = AddAndNorm(**model_params)
+        self.feed_forward = FeedForward(**model_params)
+
+    def forward(self, input1):
+        head_num = self.model_params["head_num"]
+        q = reshape_by_heads(self.Wq(input1), head_num=head_num)
+        k = reshape_by_heads(self.Wk(input1), head_num=head_num)
+        v = reshape_by_heads(self.Wv(input1), head_num=head_num)
+        out_concat = multi_head_attention(q, k, v, use_efficient=False)
+        multi_head_out = self.multi_head_combine(out_concat)
+        out1 = self.add_n_normalization_1(input1, multi_head_out)
+        out2 = self.feed_forward(out1)
+        return self.add_n_normalization_2(out1, out2)
 
 
 class GlobalExpert(nn.Module):
-    """Single global transformer layer."""
-
     def __init__(self, **model_params):
         super().__init__()
         mp = model_params.copy()
         mp["use_sparse"] = False
-        self.layer = EncoderLayer(**mp)
+        self.layer = PLEEncoderLayer(**mp)
 
     def forward(self, x):
         return self.layer(x)
@@ -60,9 +85,7 @@ class PLELayer(nn.Module):
         final_task_nodes = task_out_nodes + alpha * shared_contrib
 
         if task_in.size(1) > num_nodes:
-            final_task = torch.cat(
-                [final_task_nodes, task_in[:, num_nodes:]], dim=1
-            )
+            final_task = torch.cat([final_task_nodes, task_in[:, num_nodes:]], dim=1)
         else:
             final_task = final_task_nodes
 
@@ -76,7 +99,7 @@ class VRP_Encoder(nn.Module):
         embedding_dim = model_params["embedding_dim"]
         encoder_layer_num = model_params["encoder_layer_num"]
         self.p_num = model_params.get("p_num", 6)
-        num_task_groups = int(model_params.get("K", model_params.get("ple_num_task_groups", 3)))
+        num_task_groups = int(model_params.get("ple_num_task_groups", 3))
 
         self.embedding_depot = nn.Linear(3, embedding_dim)
         self.embedding_node = nn.Linear(7, embedding_dim)
@@ -138,7 +161,5 @@ class VRP_Encoder(nn.Module):
                 shared_x, task_x, prompt_for_gate, num_nodes
             )
 
-        out = self.final_fusion(
-            torch.cat([shared_x, task_x[:, :num_nodes]], dim=-1)
-        )
+        out = self.final_fusion(torch.cat([shared_x, task_x[:, :num_nodes]], dim=-1))
         return out, coords

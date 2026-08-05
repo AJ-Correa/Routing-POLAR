@@ -2,8 +2,36 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .encoder import EncoderLayer
-from .layers import RMSNorm
+from .layers import AddAndNorm, ParallelGatedMLP, RMSNorm, multi_head_attention, reshape_by_heads
+
+
+class PLEEncoderLayer(nn.Module):
+    def __init__(self, **model_params):
+        super().__init__()
+        self.model_params = model_params
+        embedding_dim = self.model_params["embedding_dim"]
+        head_num = self.model_params["head_num"]
+        qkv_dim = self.model_params["qkv_dim"]
+        self.Wq = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.Wk = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.Wv = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
+        self.add_n_normalization_1 = AddAndNorm(**model_params)
+        self.add_n_normalization_2 = AddAndNorm(**model_params)
+        self.feed_forward = ParallelGatedMLP(hidden_size=embedding_dim)
+
+    def forward(self, input1):
+        normed = self.add_n_normalization_1(None, input1)
+        head_num = self.model_params["head_num"]
+        q = reshape_by_heads(self.Wq(normed), head_num=head_num)
+        k = reshape_by_heads(self.Wk(normed), head_num=head_num)
+        v = reshape_by_heads(self.Wv(normed), head_num=head_num)
+        out_concat = multi_head_attention(q, k, v)
+        multi_head_out = self.multi_head_combine(out_concat)
+        input2 = input1 + multi_head_out
+        normed2 = self.add_n_normalization_2(None, input2)
+        ff_out = self.feed_forward(normed2)
+        return input2 + ff_out
 
 
 class GlobalExpert(nn.Module):
@@ -11,7 +39,7 @@ class GlobalExpert(nn.Module):
         super().__init__()
         mp = model_params.copy()
         mp["use_sparse"] = False
-        self.layer = EncoderLayer(**mp)
+        self.layer = PLEEncoderLayer(**mp)
 
     def forward(self, x):
         return self.layer(x)
@@ -35,9 +63,6 @@ class PLELayer(nn.Module):
         )
         _init = torch.logit(torch.tensor(0.1))
         self.alpha = nn.Parameter(_init.clone())
-        # RouteFinder uses pre-norm experts; unlike MTPOMO/MVMoE (post-norm
-        # InstanceNorm), gated expert blending shrinks activations each layer
-        # unless we re-scale the two PLE pathways explicitly.
         self.shared_norm = RMSNorm(self.embed_dim)
         self.task_norm = RMSNorm(self.embed_dim)
 
@@ -51,8 +76,6 @@ class PLELayer(nn.Module):
 
         task_weights = gate_weights[:, : self.num_task_groups]
         shared_weight = gate_weights[:, self.num_task_groups :]
-        # Renormalize task gates so expert blending preserves scale; shared
-        # injection is handled separately via alpha and shared_weight.
         task_weights = task_weights / task_weights.sum(
             dim=-1, keepdim=True
         ).clamp(min=1e-6)
@@ -66,14 +89,10 @@ class PLELayer(nn.Module):
 
         alpha = torch.sigmoid(self.alpha)
         shared_contrib = shared_out * shared_weight.unsqueeze(1)
-        final_task_nodes = self.task_norm(
-            task_out_nodes + alpha * shared_contrib
-        )
+        final_task_nodes = self.task_norm(task_out_nodes + alpha * shared_contrib)
 
         if task_in.size(1) > num_nodes:
-            final_task = torch.cat(
-                [final_task_nodes, task_in[:, num_nodes:]], dim=1
-            )
+            final_task = torch.cat([final_task_nodes, task_in[:, num_nodes:]], dim=1)
         else:
             final_task = final_task_nodes
 
@@ -87,7 +106,7 @@ class VRP_Encoder(nn.Module):
         embedding_dim = model_params["embedding_dim"]
         encoder_layer_num = model_params["encoder_layer_num"]
         self.p_num = model_params.get("p_num", 6)
-        num_task_groups = model_params.get("ple_num_task_groups", 3)
+        num_task_groups = int(model_params.get(["K"], 3))
 
         self.embedding_depot = nn.Linear(3, embedding_dim)
         self.embedding_node = nn.Linear(7, embedding_dim)
@@ -147,8 +166,6 @@ class VRP_Encoder(nn.Module):
             )
 
         out = self.output_norm(
-            self.final_fusion(
-                torch.cat([shared_x, task_x[:, :num_nodes]], dim=-1)
-            )
+            self.final_fusion(torch.cat([shared_x, task_x[:, :num_nodes]], dim=-1))
         )
         return out, coords

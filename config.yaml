@@ -15,10 +15,8 @@ model_params:
   K: 3                        # Number of task-specific PLE experts
   
   # Feature switches
-  use_film: true              # FiLM (Feature-wise Linear Modulation) for task conditioning (Corrêa et al., 2026)
   use_gate: true              # Preference-gated block (Meng et al., 2026)
-  use_rope: true              # RoPE-2D (2D Rotary Positional Embeddings)
-  use_ple: true               # Progressive Layered Extraction
+  use_ple: true               # PLE in main model (bundles FiLM, RoPE, GPT-2 init); baselines: PLE only
 
 
 # =============================================================================
