@@ -1,8 +1,17 @@
 # Run outputs (ignore by default)
-result/**
+result/*
 old_result/**
 graphify-out/
 paper/
+
+!result/n=50/
+result/n=50/*
+!result/n=50/checkpoint-300.pt
+!result/n=100/
+result/n=100/*
+!result/n=100/2026-0729-1221/
+result/n=100/2026-0729-1221/*
+!result/n=100/2026-0729-1221/checkpoint-300.pt
 
 # Published paper checkpoints (epoch 300 only)
 !result/POLAR/

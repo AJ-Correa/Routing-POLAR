@@ -43,10 +43,8 @@ class VRP_Encoder(nn.Module):
         self.embedding_depot = nn.Linear(3, embedding_dim)
         self.embedding_node = nn.Linear(7, embedding_dim)
 
-        model_params_copy = model_params.copy()
-        model_params_copy["use_sparse"] = False
         self.layers = nn.ModuleList(
-            [EncoderLayer(**model_params_copy) for _ in range(encoder_layer_num)]
+            [EncoderLayer(**model_params) for _ in range(encoder_layer_num)]
         )
 
     def _embed(self, td):

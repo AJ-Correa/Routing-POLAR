@@ -1,1 +1,2 @@
-result/POLAR/**/checkpoint-300.pt filter=lfs diff=lfs merge=lfs -text
+result/n=50/checkpoint-300.pt filter=lfs diff=lfs merge=lfs -text
+result/n=100/2026-0729-1221/checkpoint-300.pt filter=lfs diff=lfs merge=lfs -text
