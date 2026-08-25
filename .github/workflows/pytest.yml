@@ -40,6 +40,12 @@ jobs:
           pip install -r /tmp/requirements-base.txt
           pip install rl4co==0.2.0 torchrl==0.1.1 --no-deps
 
+      - name: Build Cython heuristics
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential
+          cd search/cython_heuristics && python setup.py build_ext --inplace
+
       - name: Run pytest
         env:
           WANDB_MODE: disabled
