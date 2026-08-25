@@ -1,0 +1,46 @@
+name: Pytest
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: pytest-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install PyTorch (CPU)
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            torch==2.0.1 \
+            torchvision==0.15.2 \
+            torchaudio==2.0.2 \
+            --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install project dependencies
+        run: |
+          grep -vE '^(#|$|torch==|torchvision==|torchaudio==|rl4co==|torchrl==|lion-pytorch==)' requirements.txt \
+            > /tmp/requirements-base.txt
+          pip install -r /tmp/requirements-base.txt
+          pip install rl4co==0.2.0 torchrl==0.1.1 --no-deps
+
+      - name: Run pytest
+        env:
+          WANDB_MODE: disabled
+        run: pytest
