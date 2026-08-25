@@ -4,23 +4,17 @@ old_result/**
 graphify-out/
 paper/
 
+# Published checkpoints (epoch 300 only; LFS)
 !result/n=50/
 result/n=50/*
-!result/n=50/checkpoint-300.pt
+!result/n=50/2026-0728-0719/
+result/n=50/2026-0728-0719/*
+!result/n=50/2026-0728-0719/checkpoint-300.pt
 !result/n=100/
 result/n=100/*
 !result/n=100/2026-0729-1221/
 result/n=100/2026-0729-1221/*
 !result/n=100/2026-0729-1221/checkpoint-300.pt
-
-# Published paper checkpoints (epoch 300 only)
-!result/POLAR/
-!result/POLAR/n=50/
-!result/POLAR/n=50/2026-0716-1942/
-!result/POLAR/n=50/2026-0716-1942/checkpoint-300.pt
-!result/POLAR/n=100/
-!result/POLAR/n=100/2026-0517-1400/
-!result/POLAR/n=100/2026-0517-1400/checkpoint-300.pt
 
 # Python bytecode caches (anywhere in the repo)
 __pycache__/

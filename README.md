@@ -106,12 +106,13 @@ The default model under `models/` is **Ours** model from the paper (single-strea
 To run a baseline, replace the model import in `trainer.py` and/or `tuner.py`:
 
 ```python
-# Default (RouteFinder)
+# Default (Ours model)
 from models.model import VRPModel
 
 # Baselines — uncomment one:
 # from neural_baselines.mtpomo.model import VRPModel
 # from neural_baselines.mvmoe.model import VRPModel
+# from neural_baselines.routefinder.model import VRPModel
 ```
 
 ---
@@ -256,7 +257,7 @@ Fine-tuning on **unseen** variants, following Berto et al. (2025). Activated wit
 **Checkpoint path convention:** `--path_id` is relative to `result/`. Example:
 
 ```text
---path_id "POLAR/n=50/2026-0515-1225"  →  result/POLAR/n=50/2026-0515-1225/checkpoint-{epoch}.pt
+--path_id "n=50/2026-0728-0719"  →  result/n=50/2026-0728-0719/checkpoint-{epoch}.pt
 ```
 
 Replace the folder name with your own run directory under `result/`.
@@ -302,7 +303,7 @@ python run.py --n_size 50 --batch_size 256 --test
 python run.py --n_size 100 --batch_size 256 --test
 ```
 
-> ⚠️ `**--test**` runs evaluation every `test_interval` epochs (default 10) plus at epochs listed in `test_epoch` (`[50, 150]`).
+> ⚠️ `--test` runs evaluation every `test_interval` epochs (default 10) plus at epochs listed in `test_epoch` (`[50, 150]`).
 
 ### Recommended `config.yaml` snippet
 
@@ -332,18 +333,18 @@ docker run --rm --gpus all \
 
 ## 🔁 Reproducing Paper Experiments
 
-Pre-trained checkpoints (epoch 300) are available under `result/POLAR/`:
+Pre-trained checkpoints (epoch 300) are available under `result/n=50/` and `result/n=100/`:
 
 ### Evaluate on synthetic benchmarks
 
 ```bash
-# n = 50 (example path_id — use your run folder if different)
+# n = 50
 python run.py --n_size 50 --test --test_only \
-  --resume --epoch 300 --path_id "POLAR/n=50/2026-0515-1225"
+  --resume --epoch 300 --path_id "n=50/2026-0728-0719"
 
 # n = 100
 python run.py --n_size 100 --test --test_only \
-  --resume --epoch 300 --path_id "POLAR/n=100/2026-0517-1400"
+  --resume --epoch 300 --path_id "n=100/2026-0729-1221"
 ```
 
 ---
@@ -356,21 +357,21 @@ Fine-tune a pretrained checkpoint on **unseen** variants. Requires `--resume`.
 
 ```bash
 python run.py --tune --variant md --n_size 50 \
-  --resume --epoch 300 --path_id "POLAR/n=50/2026-0515-1225" --test
+  --resume --epoch 300 --path_id "n=50/2026-0728-0719" --test
 ```
 
 ### Mixed backhaul (`mb`, 8 types)
 
 ```bash
 python run.py --tune --variant mb --n_size 50 \
-  --resume --epoch 300 --path_id "POLAR/n=50/2026-0515-1225" --test
+  --resume --epoch 300 --path_id "n=50/2026-0728-0719" --test
 ```
 
 ### Multi-depot + mixed backhaul (`both`, 8 types)
 
 ```bash
 python run.py --tune --variant both --n_size 100 \
-  --resume --epoch 300 --path_id "POLAR/n=100/2026-0517-1400" --test
+  --resume --epoch 300 --path_id "n=100/2026-0729-1221" --test
 ```
 
 Tuned weights are saved to `result/<timestamp>/tuned-{variant}-{epoch}.pt`.
@@ -383,21 +384,21 @@ Tuned weights are saved to `result/<timestamp>/tuned-{variant}-{epoch}.pt`.
 
 ```bash
 python run.py --n_size 50 --test --test_only \
-  --resume --epoch 300 --path_id "POLAR/n=50/2026-0515-1225"
+  --resume --epoch 300 --path_id "n=50/2026-0728-0719"
 ```
 
-### Fine-tuning benchmarks (works with `md`, `mb`or `both`)
+### Fine-tuning benchmarks (works with `md`, `mb`, or `both`)
 
 ```bash
 python run.py --tune --variant md --test_only \
-  --resume --epoch 300 --path_id "POLAR/n=50/2026-0515-1225"
+  --resume --epoch 300 --path_id "n=50/2026-0728-0719"
 ```
 
 ### CVRPLIB benchmark (`--test_lib`)
 
 ```bash
 python run.py --n_size 100 --test_lib \
-  --resume --epoch 300 --path_id "POLAR/n=100/2026-0517-1400"
+  --resume --epoch 300 --path_id "n=100/2026-0729-1221"
 ```
 
 Reads instances from `data/lib_data/`.
@@ -422,7 +423,7 @@ Then run any test command above.
 
 ```bash
 python run.py --n_size 50 --batch_size 256 --test \
-  --resume --epoch 150 --path_id "POLAR/n=50/2026-0515-1225"
+  --resume --epoch 150 --path_id "n=50/2026-0728-0719"
 ```
 
 ---
